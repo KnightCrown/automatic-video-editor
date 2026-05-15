@@ -1,0 +1,293 @@
+use std::path::Path;
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
+use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::asr::model_download::{missing_parakeet_files, model_dir};
+use crate::types::{PipelineProgress, Transcript, TranscriptSegment, TranscriptWord};
+
+const TRANSCRIBE_PROGRESS_START: f64 = 40.0;
+const TRANSCRIBE_PROGRESS_END: f64 = 95.0;
+
+static TRANSCRIBER: Lazy<Mutex<Option<ParakeetTDT>>> = Lazy::new(|| Mutex::new(None));
+
+/// Parakeet TDT ONNX models fail on long clips (attention broadcast errors).
+/// Keep chunks well under the documented ~8–10 minute limit.
+const MAX_CHUNK_SECS: f64 = 240.0;
+
+fn load_transcriber(app: &AppHandle) -> Result<(), String> {
+    let mut guard = TRANSCRIBER
+        .lock()
+        .map_err(|_| "transcriber_lock_failed".to_string())?;
+    if guard.is_some() {
+        return Ok(());
+    }
+    let dir = model_dir(app)?;
+    if !dir.is_dir() {
+        return Err(
+            "Parakeet model is not downloaded. Open Settings and download the speech model first."
+                .to_string(),
+        );
+    }
+    let missing = missing_parakeet_files(app)?;
+    if !missing.is_empty() {
+        return Err(format!(
+            "Parakeet model is incomplete. Missing files: {}. Re-download the model in Settings.",
+            missing.join(", ")
+        ));
+    }
+    let model = ParakeetTDT::from_pretrained(&dir, None).map_err(|e| {
+        format!(
+            "Failed to load Parakeet model from {}: {}. Try re-downloading the model in Settings.",
+            dir.display(),
+            e
+        )
+    })?;
+    *guard = Some(model);
+    Ok(())
+}
+
+fn read_wav_mono(path: &str) -> Result<(Vec<f32>, u32), String> {
+    let mut reader =
+        hound::WavReader::open(path).map_err(|e| format!("Failed to read WAV file: {e}"))?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+    let channels = spec.channels.max(1);
+
+    let raw: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read WAV samples: {e}"))?,
+        hound::SampleFormat::Int => reader
+            .samples::<i16>()
+            .map(|s| s.map(|s| s as f32 / 32768.0))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read WAV samples: {e}"))?,
+    };
+
+    if channels == 1 {
+        return Ok((raw, sample_rate));
+    }
+
+    let ch = channels as usize;
+    let mono: Vec<f32> = raw
+        .chunks(ch)
+        .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+        .collect();
+    Ok((mono, sample_rate))
+}
+
+fn chunk_audio(audio: &[f32], sample_rate: u32) -> Vec<(usize, Vec<f32>)> {
+    let chunk_samples = ((sample_rate as f64) * MAX_CHUNK_SECS).ceil() as usize;
+    if audio.is_empty() {
+        return Vec::new();
+    }
+    if audio.len() <= chunk_samples {
+        return vec![(0, audio.to_vec())];
+    }
+
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+    while offset < audio.len() {
+        let end = (offset + chunk_samples).min(audio.len());
+        chunks.push((offset, audio[offset..end].to_vec()));
+        if end >= audio.len() {
+            break;
+        }
+        offset = end;
+    }
+    chunks
+}
+
+fn emit_transcribe_progress(
+    app: &AppHandle,
+    job_id: &str,
+    percent: f64,
+    message: &str,
+) {
+    let _ = app.emit(
+        "pipeline_progress",
+        PipelineProgress {
+            job_id: job_id.to_string(),
+            stage: "transcribe".to_string(),
+            percent: percent as f32,
+            message: Some(message.to_string()),
+        },
+    );
+}
+
+fn transcribe_chunks(
+    app: &AppHandle,
+    job_id: &str,
+    model: &mut ParakeetTDT,
+    audio: Vec<f32>,
+    sample_rate: u32,
+) -> Result<(String, Vec<TranscriptSegment>), String> {
+    let chunks = chunk_audio(&audio, sample_rate);
+    let chunk_count = chunks.len().max(1);
+
+    let mut full_text_parts: Vec<String> = Vec::new();
+    let mut all_segments: Vec<TranscriptSegment> = Vec::new();
+
+    for (index, (sample_offset, chunk)) in chunks.into_iter().enumerate() {
+        let chunk_num = index + 1;
+        let percent = TRANSCRIBE_PROGRESS_START
+            + (TRANSCRIBE_PROGRESS_END - TRANSCRIBE_PROGRESS_START)
+                * (index as f64 / chunk_count as f64);
+        emit_transcribe_progress(
+            app,
+            job_id,
+            percent,
+            &format!("Transcribing chunk {chunk_num} of {chunk_count}…"),
+        );
+
+        let offset_secs = sample_offset as f64 / sample_rate as f64;
+
+        let result = model
+            .transcribe_samples(
+                chunk,
+                sample_rate,
+                1,
+                Some(TimestampMode::Sentences),
+            )
+            .map_err(|e| {
+                let duration_mins = audio.len() as f64 / sample_rate as f64 / 60.0;
+                format!(
+                    "Parakeet failed on chunk {} of {} (~{:.0}s–{:.0}s of {:.1} min audio): {}. \
+                     If this persists, try a shorter clip or report the issue.",
+                    index + 1,
+                    chunk_count,
+                    offset_secs,
+                    offset_secs + MAX_CHUNK_SECS,
+                    duration_mins,
+                    e
+                )
+            })?;
+
+        let text = result.text.trim();
+        if !text.is_empty() {
+            full_text_parts.push(text.to_string());
+        }
+
+        let offset_secs = offset_secs as f32;
+        for token in result.tokens {
+            let text = token.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            all_segments.push(TranscriptSegment {
+                start_ms: ((token.start + offset_secs) * 1000.0) as u64,
+                end_ms: ((token.end + offset_secs) * 1000.0) as u64,
+                text: token.text,
+            });
+        }
+    }
+
+    emit_transcribe_progress(
+        app,
+        job_id,
+        TRANSCRIBE_PROGRESS_END,
+        "Merging transcript…",
+    );
+
+    Ok((full_text_parts.join(" "), all_segments))
+}
+
+pub fn transcribe_wav(
+    app: &AppHandle,
+    job_id: &str,
+    wav_path: &str,
+    video_id: &str,
+    video_path: &str,
+) -> Result<Transcript, String> {
+    load_transcriber(app)?;
+
+    let (audio, sample_rate) = read_wav_mono(wav_path)?;
+    let duration_secs = audio.len() as f64 / sample_rate as f64;
+
+    let mut guard = TRANSCRIBER
+        .lock()
+        .map_err(|_| "transcriber_lock_failed".to_string())?;
+    let model = guard
+        .as_mut()
+        .ok_or_else(|| "parakeet_not_loaded".to_string())?;
+
+    let (full_text, segments) = if duration_secs > MAX_CHUNK_SECS {
+        transcribe_chunks(app, job_id, model, audio, sample_rate)?
+    } else {
+        emit_transcribe_progress(app, job_id, TRANSCRIBE_PROGRESS_START, "Transcribing with Parakeet…");
+        let result = model
+            .transcribe_samples(
+                audio,
+                sample_rate,
+                1,
+                Some(TimestampMode::Sentences),
+            )
+            .map_err(|e| {
+                format!(
+                    "Parakeet transcription failed ({:.1}s audio): {e}",
+                    duration_secs
+                )
+            })?;
+
+        let segments: Vec<TranscriptSegment> = result
+            .tokens
+            .iter()
+            .map(|t| TranscriptSegment {
+                start_ms: (t.start * 1000.0) as u64,
+                end_ms: (t.end * 1000.0) as u64,
+                text: t.text.clone(),
+            })
+            .collect();
+
+        (result.text, segments)
+    };
+
+    let words: Vec<TranscriptWord> = segments
+        .iter()
+        .flat_map(|seg| {
+            seg.text.split_whitespace().map(|w| TranscriptWord {
+                start_ms: seg.start_ms,
+                end_ms: seg.end_ms,
+                text: w.to_string(),
+            })
+        })
+        .collect();
+
+    Ok(Transcript {
+        video_id: video_id.to_string(),
+        video_path: video_path.to_string(),
+        full_text,
+        segments,
+        words: Some(words),
+    })
+}
+
+pub fn invalidate_transcriber() {
+    if let Ok(mut guard) = TRANSCRIBER.lock() {
+        *guard = None;
+    }
+}
+
+pub fn wav_cache_path(app: &AppHandle, job_id: &str) -> Result<String, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("app_cache_dir_failed:{}", e))?
+        .join("transcribe");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("create_cache_dir:{}", e))?;
+    Ok(cache
+        .join(format!("{job_id}.wav"))
+        .to_string_lossy()
+        .to_string())
+}
+
+pub fn cleanup_wav(path: &str) {
+    let p = Path::new(path);
+    if p.is_file() {
+        let _ = std::fs::remove_file(p);
+    }
+}

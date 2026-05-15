@@ -1,0 +1,166 @@
+use tauri::{AppHandle, Emitter};
+
+use crate::asr::parakeet::{cleanup_wav, transcribe_wav, wav_cache_path};
+use crate::asr::{download_parakeet_model, parakeet_model_ready};
+use crate::audio::ffmpeg::extract_audio_for_transcription;
+use crate::pipeline::scan::scan_video_folder;
+use crate::store::project::{
+    ensure_project_dirs, has_transcript_for_video, load_project, project_paths, save_project,
+    save_transcript, sync_videos_in_manifest,
+};
+use crate::types::{PipelineProgress, ProjectManifest, VideoJob};
+
+pub async fn run_transcription_pipeline(
+    app: AppHandle,
+    project_root: String,
+) -> Result<ProjectManifest, String> {
+    if !parakeet_model_ready(&app)? {
+        return Err("parakeet_model_not_ready".to_string());
+    }
+
+    let videos = scan_video_folder(&project_root)?;
+    let mut manifest = sync_videos_in_manifest(&project_root, videos)?;
+    let paths = project_paths(&project_root)?;
+    ensure_project_dirs(&paths)?;
+    let video_count = manifest.videos.len();
+    for index in 0..video_count {
+        let video = manifest.videos[index].clone();
+        let job_id = video.id.clone();
+
+        if has_transcript_for_video(&paths, &video.id, &video.path)? {
+            manifest.videos[index].status = "transcribed".to_string();
+            manifest.videos[index].error = None;
+            let _ = save_project(&manifest);
+            let _ = app.emit(
+                "pipeline_progress",
+                PipelineProgress {
+                    job_id: job_id.clone(),
+                    stage: "done".to_string(),
+                    percent: 100.0,
+                    message: Some(format!(
+                        "Using saved transcript for {}",
+                        video.file_name
+                    )),
+                },
+            );
+            continue;
+        }
+
+        manifest.videos[index].status = "processing".to_string();
+        manifest.videos[index].error = None;
+        let _ = save_project(&manifest);
+
+        let result = process_single_video(
+            app.clone(),
+            &project_root,
+            &video,
+            job_id,
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                manifest.videos[index].status = "transcribed".to_string();
+                manifest.videos[index].error = None;
+            }
+            Err(err) => {
+                manifest.videos[index].status = "failed".to_string();
+                manifest.videos[index].error = Some(err);
+            }
+        }
+        let _ = save_project(&manifest);
+    }
+
+    manifest = load_project(&project_root)?;
+    Ok(manifest)
+}
+
+pub async fn process_single_video(
+    app: AppHandle,
+    project_root: &str,
+    video: &VideoJob,
+    job_id: String,
+) -> Result<(), String> {
+    let paths = project_paths(project_root)?;
+
+    if has_transcript_for_video(&paths, &video.id, &video.path)? {
+        let _ = app.emit(
+            "pipeline_progress",
+            PipelineProgress {
+                job_id: job_id.clone(),
+                stage: "done".to_string(),
+                percent: 100.0,
+                message: Some(format!(
+                    "Using saved transcript for {}",
+                    video.file_name
+                )),
+            },
+        );
+        return Ok(());
+    }
+
+    let wav_path = wav_cache_path(&app, &job_id)?;
+
+    let _ = app.emit(
+        "pipeline_progress",
+        PipelineProgress {
+            job_id: job_id.clone(),
+            stage: "start".to_string(),
+            percent: 0.0,
+            message: Some(format!("Processing {}", video.file_name)),
+        },
+    );
+
+    extract_audio_for_transcription(
+        app.clone(),
+        video.path.clone(),
+        wav_path.clone(),
+        job_id.clone(),
+    )
+    .await
+    .map_err(|e| format!("[Audio extraction] {e}"))?;
+
+    let _ = app.emit(
+        "pipeline_progress",
+        PipelineProgress {
+            job_id: job_id.clone(),
+            stage: "transcribe".to_string(),
+            percent: 40.0,
+            message: Some("Transcribing with Parakeet…".to_string()),
+        },
+    );
+
+    let transcript = transcribe_wav(&app, &job_id, &wav_path, &video.id, &video.path)
+        .map_err(|e| format!("[Speech recognition] {e}"))?;
+    save_transcript(&paths, &transcript)
+        .map_err(|e| format!("[Save transcript] {e}"))?;
+
+    cleanup_wav(&wav_path);
+
+    let _ = app.emit(
+        "pipeline_progress",
+        PipelineProgress {
+            job_id,
+            stage: "done".to_string(),
+            percent: 100.0,
+            message: Some("Complete".to_string()),
+        },
+    );
+
+    Ok(())
+}
+
+pub async fn ensure_model_and_run(
+    app: AppHandle,
+    project_root: String,
+    auto_download: bool,
+) -> Result<ProjectManifest, String> {
+    if !parakeet_model_ready(&app)? {
+        if auto_download {
+            download_parakeet_model(app.clone()).await?;
+        } else {
+            return Err("parakeet_model_not_ready".to_string());
+        }
+    }
+    run_transcription_pipeline(app, project_root).await
+}
