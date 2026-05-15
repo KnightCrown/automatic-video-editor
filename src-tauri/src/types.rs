@@ -25,6 +25,14 @@ pub struct Transcript {
     pub segments: Vec<TranscriptSegment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub words: Option<Vec<TranscriptWord>>,
+    /// Container metadata (seconds). Helps debug drift vs timeline; FFmpeg extract is not trimmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probed_video_stream_start_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probed_audio_stream_start_sec: Option<f64>,
+    /// Added to every segment/word when saving (project setting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_transcript_timing_offset_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +71,9 @@ pub struct OverlaySuggestion {
     pub start_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_ms: Option<u64>,
+    /// Recommended on-screen duration for this overlay (ms). Editors should honor this ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ideal_display_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bible_story: Option<String>,
     pub rationale: String,
@@ -165,6 +176,9 @@ pub struct ProjectSettings {
     /// xAI Grok Imagine model id (see [`DEFAULT_GROK_IMAGINE_MODEL`]).
     #[serde(default = "default_grok_imagine_model")]
     pub grok_imagine_model: String,
+    /// Positive shifts transcript later vs video (milliseconds). Tune if overlays cue early.
+    #[serde(default)]
+    pub transcript_timing_offset_ms: i64,
 }
 
 /// Default xAI Grok Imagine model for overlay image generation.
@@ -186,6 +200,7 @@ impl Default for ProjectSettings {
             openai_image_model: "gpt-image-1".to_string(),
             image_provider: "xai".to_string(),
             grok_imagine_model: default_grok_imagine_model(),
+            transcript_timing_offset_ms: 0,
         }
     }
 }

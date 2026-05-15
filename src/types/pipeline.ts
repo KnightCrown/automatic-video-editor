@@ -10,6 +10,11 @@ export interface Transcript {
   fullText: string;
   segments: TranscriptSegment[];
   words?: { startMs: number; endMs: number; text: string }[];
+  /** From ffprobe — container stream start_time (s). */
+  probedVideoStreamStartSec?: number;
+  probedAudioStreamStartSec?: number;
+  /** Project setting applied when this file was saved (ms). */
+  appliedTranscriptTimingOffsetMs?: number;
 }
 
 export type OverlayCandidateStatus =
@@ -38,6 +43,8 @@ export interface OverlaySuggestion {
   transcriptExcerpt: string;
   startMs?: number;
   endMs?: number;
+  /** Suggested duration the image stays on screen (ms), typically ≤ 15000. */
+  idealDisplayMs?: number;
   bibleStory?: string;
   rationale: string;
 }
@@ -113,6 +120,8 @@ export interface ProjectSettings {
   imageProvider: string;
   /** xAI Grok Imagine model id */
   grokImagineModel: string;
+  /** Added to every timestamp after transcribe. Positive = shift later if cues are early. */
+  transcriptTimingOffsetMs?: number;
 }
 
 export interface ProjectManifest {

@@ -6,6 +6,7 @@ use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::asr::model_download::{missing_parakeet_files, model_dir};
+use crate::audio::ffmpeg::probe_av_stream_start_times;
 use crate::types::{PipelineProgress, Transcript, TranscriptSegment, TranscriptWord};
 
 const TRANSCRIBE_PROGRESS_START: f64 = 40.0;
@@ -100,6 +101,30 @@ fn chunk_audio(audio: &[f32], sample_rate: u32) -> Vec<(usize, Vec<f32>)> {
         offset = end;
     }
     chunks
+}
+
+fn add_signed_ms(ms: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        ms.saturating_add(delta as u64)
+    } else {
+        ms.saturating_sub((-delta) as u64)
+    }
+}
+
+fn apply_transcript_timing_offset(t: &mut Transcript, delta_ms: i64) {
+    if delta_ms == 0 {
+        return;
+    }
+    for s in &mut t.segments {
+        s.start_ms = add_signed_ms(s.start_ms, delta_ms);
+        s.end_ms = add_signed_ms(s.end_ms, delta_ms);
+    }
+    if let Some(ref mut words) = t.words {
+        for w in words {
+            w.start_ms = add_signed_ms(w.start_ms, delta_ms);
+            w.end_ms = add_signed_ms(w.end_ms, delta_ms);
+        }
+    }
 }
 
 fn emit_transcribe_progress(
@@ -202,6 +227,7 @@ pub fn transcribe_wav(
     wav_path: &str,
     video_id: &str,
     video_path: &str,
+    transcript_timing_offset_ms: i64,
 ) -> Result<Transcript, String> {
     load_transcriber(app)?;
 
@@ -257,13 +283,25 @@ pub fn transcribe_wav(
         })
         .collect();
 
-    Ok(Transcript {
+    let (probed_video, probed_audio) = probe_av_stream_start_times(video_path);
+
+    let mut transcript = Transcript {
         video_id: video_id.to_string(),
         video_path: video_path.to_string(),
         full_text,
         segments,
         words: Some(words),
-    })
+        probed_video_stream_start_sec: probed_video,
+        probed_audio_stream_start_sec: probed_audio,
+        applied_transcript_timing_offset_ms: None,
+    };
+
+    apply_transcript_timing_offset(&mut transcript, transcript_timing_offset_ms);
+    if transcript_timing_offset_ms != 0 {
+        transcript.applied_transcript_timing_offset_ms = Some(transcript_timing_offset_ms);
+    }
+
+    Ok(transcript)
 }
 
 pub fn invalidate_transcriber() {

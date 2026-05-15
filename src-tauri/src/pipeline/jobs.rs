@@ -82,6 +82,8 @@ pub async fn process_single_video(
     job_id: String,
 ) -> Result<(), String> {
     let paths = project_paths(project_root)?;
+    let manifest = load_project(project_root)?;
+    let transcript_timing_offset_ms = manifest.settings.transcript_timing_offset_ms;
 
     if has_transcript_for_video(&paths, &video.id, &video.path)? {
         let _ = app.emit(
@@ -130,8 +132,9 @@ pub async fn process_single_video(
         },
     );
 
-    let transcript = transcribe_wav(&app, &job_id, &wav_path, &video.id, &video.path)
-        .map_err(|e| format!("[Speech recognition] {e}"))?;
+    let transcript =
+        transcribe_wav(&app, &job_id, &wav_path, &video.id, &video.path, transcript_timing_offset_ms)
+            .map_err(|e| format!("[Speech recognition] {e}"))?;
     save_transcript(&paths, &transcript)
         .map_err(|e| format!("[Save transcript] {e}"))?;
 

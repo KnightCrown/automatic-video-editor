@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::types::{
     OverlayCandidate, OverlayPromptResult, OverlaySuggestion, ProjectSettings, Transcript,
-    TranscriptAnalysis,
+    TranscriptAnalysis, TranscriptSegment,
 };
 
 use crate::store::secrets;
@@ -16,6 +16,119 @@ use crate::store::secrets;
 const OVERLAY_MASTER_PROMPT: &str = include_str!("overlay_master_prompt.txt");
 
 const MAX_TRANSCRIPT_CHARS: usize = 80_000;
+
+/// Slice Parakeet "sentence" segments this small for LLM transcript context (~≤10 s each).
+const MAX_LLM_SEGMENT_SLICE_MS: u64 = 10_000;
+/// Hard cap per suggestion transcript alignment (speech span referenced by overlay).
+const MAX_TRANSCRIPT_ALIGN_MS: u64 = 15_000;
+/// Ceiling for suggested on-screen overlay duration returned by the model.
+const MAX_IDEAL_DISPLAY_MS: u64 = 15_000;
+
+/// Which time bucket a word occupies when spreading `n_words` evenly across `[0,dur_ms)`.
+fn word_mid_bucket(word_i: usize, n_words: usize, num_chunks: usize, dur_ms: u64) -> usize {
+    let nc = num_chunks.max(1);
+    debug_assert!(n_words > 0);
+    debug_assert!(word_i < n_words);
+    let denom = ((2 * n_words) as u64).max(1);
+    let mid_rel_ms = dur_ms.saturating_mul((2 * word_i + 1) as u64) / denom;
+    let bi =
+        (((mid_rel_ms as u128) * (nc as u128)) / ((dur_ms.max(1)) as u128)) as usize;
+    bi.min(nc.saturating_sub(1)).max(0)
+}
+
+/// Subdivide Parakeet segments — each emitted slice spans at most max_ms except degenerate tails.
+fn split_segment_max_duration(seg: &TranscriptSegment, max_ms: u64) -> Vec<TranscriptSegment> {
+    let start = seg.start_ms;
+    let end = seg.end_ms;
+    if end <= start {
+        return vec![seg.clone()];
+    }
+    let dur = end - start;
+    if dur <= max_ms {
+        return vec![seg.clone()];
+    }
+    let words: Vec<&str> = seg.text.split_whitespace().collect();
+    let n_words = words.len();
+    let num_chunks = (((dur.saturating_sub(1)) / max_ms) + 1).max(1) as usize;
+
+    if words.is_empty() {
+        let mut out = Vec::new();
+        let mut t = start;
+        while t < end {
+            let e = (t + max_ms).min(end);
+            out.push(TranscriptSegment {
+                start_ms: t,
+                end_ms: e,
+                text: seg.text.trim().to_string(),
+            });
+            t = e;
+        }
+        return out;
+    }
+
+    let mut buckets: Vec<Vec<&str>> = vec![Vec::new(); num_chunks.max(1)];
+    for wi in 0..n_words {
+        let ci = word_mid_bucket(wi, n_words, num_chunks, dur);
+        buckets[ci].push(words[wi]);
+    }
+
+    let nc = buckets.len().max(1);
+    buckets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ci, wds)| {
+            let text = wds.join(" ");
+            if text.trim().is_empty() {
+                return None;
+            }
+            let t0 = start + dur * (ci as u64) / (nc as u64);
+            let t1 = if ci + 1 == nc {
+                end
+            } else {
+                start + dur * ((ci + 1) as u64) / (nc as u64)
+            };
+            Some(TranscriptSegment {
+                start_ms: t0,
+                end_ms: t1,
+                text,
+            })
+        })
+        .collect()
+}
+
+fn sentence_slices_for_llm(segments: &[TranscriptSegment]) -> Vec<TranscriptSegment> {
+    segments
+        .iter()
+        .flat_map(|s| split_segment_max_duration(s, MAX_LLM_SEGMENT_SLICE_MS))
+        .collect()
+}
+
+/// Clamp GPT timing output to sane editor bounds (≤15 s speech span / display hint).
+fn normalize_overlay_timing(
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+    ideal_display_ms: Option<u64>,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let (a, mut b) = match (start_ms, end_ms) {
+        (Some(sa), Some(eb)) if eb > sa => (Some(sa), Some(eb)),
+        _ => (start_ms, end_ms),
+    };
+    if let (Some(sa), Some(eb)) = (a, b) {
+        if eb - sa > MAX_TRANSCRIPT_ALIGN_MS {
+            b = Some(sa + MAX_TRANSCRIPT_ALIGN_MS);
+        }
+    }
+    let span_after = match (a, b) {
+        (Some(sa), Some(eb)) if eb > sa => Some(eb - sa),
+        _ => None,
+    };
+    let mut ideal = ideal_display_ms.unwrap_or_else(|| span_after.unwrap_or(MAX_IDEAL_DISPLAY_MS));
+    ideal = ideal.min(MAX_IDEAL_DISPLAY_MS).max(500);
+    if let Some(sp) = span_after {
+        ideal = ideal.min(sp);
+    }
+    (a, b, Some(ideal))
+}
 
 pub fn save_openai_api_key(api_key: &str) -> Result<(), String> {
     secrets::save_openai_api_key(api_key)
@@ -68,6 +181,8 @@ struct OpenAiSuggestionPayload {
     #[serde(default)]
     end_ms: Option<u64>,
     #[serde(default)]
+    ideal_display_ms: Option<u64>,
+    #[serde(default)]
     bible_story: Option<String>,
     rationale: String,
 }
@@ -97,6 +212,11 @@ pub async fn analyze_transcript_for_overlays(
          Follow every rule in the master brief above. Maximum 30 suggestions per episode (fewer is fine).\n\n\
          1) bibleStories: string array — every Bible story or biblical narrative discussed or referenced.\n\
          2) suggestions: array of objects, one per meaningful visual beat (not every sentence).\n\n\
+         TIMESTAMPED CONTEXT\n\
+         The user message lists **Timestamped sentence slices** (~Parakeet ASR sentences, each slice roughly ≤ {} ms of audio).\n\
+         Each line `[n]` has exact start/end times and text — use those milliseconds only when returning startMs/endMs.\n\
+         IMPORTANT: Prefer **narrow** spans: each suggestion's **(endMs - startMs)** must stay **≤ {} ms** (~{} s).\n\
+         Prefer one or a few adjacent slice ids per beat; merge ideas only when the visual truly stays unchanged.\n\n\
          For each suggestion:\n\
          - title: short, specific label for that visual beat (avoid generic titles like \"Scene 1\").\n\
          - imagePrompt: one detailed text-to-image prompt that ALREADY reflects the MASTER VISUAL STYLE \
@@ -106,16 +226,23 @@ pub async fn analyze_transcript_for_overlays(
          Must not repeat the title verbatim. Avoid scripture typography or verse dumps unless the host explicitly reads that text as on-screen wording. \
          Prefer a feeling, invitation, or plain-language takeaway rather than label-style text.\n\
          - transcriptExcerpt: quote from the transcript this beat supports.\n\
-         - startMs / endMs: use segment timestamps when possible (milliseconds).\n\
+         - startMs / endMs: copy from the numbered sentence slices wherever possible.\n\
+         - idealDisplayMs: **required** — how long editors should typically keep THIS image visible on-screen (milliseconds). \
+         Aim at or below narration pace; **never above {}**. Shorter beats (≤ 8 s typical) beat long holds.\n\
          - bibleStory: optional — which biblical narrative this ties to, if any.\n\
          - rationale: one sentence on why this beat earns an overlay and how it follows segmentation / skip rules.\n\n\
          Return ONLY valid JSON: {{ \"bibleStories\": string[], \"suggestions\": [...] }}.",
+         MAX_LLM_SEGMENT_SLICE_MS,
+         MAX_TRANSCRIPT_ALIGN_MS,
+         MAX_TRANSCRIPT_ALIGN_MS / 1000,
+         MAX_IDEAL_DISPLAY_MS,
         master = OVERLAY_MASTER_PROMPT,
         show = settings.show_context
     );
 
+    let sliced = sentence_slices_for_llm(&transcript.segments);
     let mut segments_text = String::new();
-    for (i, seg) in transcript.segments.iter().enumerate() {
+    for (i, seg) in sliced.iter().enumerate() {
         segments_text.push_str(&format!(
             "[{}] {}ms–{}ms: {}\n",
             i + 1,
@@ -126,8 +253,8 @@ pub async fn analyze_transcript_for_overlays(
     }
 
     let user_prompt = format!(
-        "Full transcript:\n\n{}\n\n---\nTimestamped segments:\n{}\n\n\
-         Analyze this episode using the master brief. Return bibleStories and suggestions only \
+        "Full transcript (reference only):\n\n{}\n\n---\nTimestamped sentence slices (authoritative timings for startMs/endMs):\n{}\n\n\
+         Analyze this episode using the master brief AND the TIMESTAMPED CONTEXT rules above. Return bibleStories and suggestions only \
          for meaningful visual storytelling moments; skip prayers, sign-offs, CTAs, sponsors, and filler per the rules.",
         transcript.full_text, segments_text
     );
@@ -182,16 +309,21 @@ pub async fn analyze_transcript_for_overlays(
         .suggestions
         .into_iter()
         .filter(|s| !s.title.trim().is_empty() && !s.image_prompt.trim().is_empty())
-        .map(|s| OverlaySuggestion {
-            id: Uuid::new_v4().to_string(),
-            title: s.title.trim().to_string(),
-            image_prompt: s.image_prompt.trim().to_string(),
-            overlay_text: s.overlay_text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
-            transcript_excerpt: s.transcript_excerpt.trim().to_string(),
-            start_ms: s.start_ms,
-            end_ms: s.end_ms,
-            bible_story: s.bible_story.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
-            rationale: s.rationale.trim().to_string(),
+        .map(|s| {
+            let (start_ms, end_ms, ideal_display_ms) =
+                normalize_overlay_timing(s.start_ms, s.end_ms, s.ideal_display_ms);
+            OverlaySuggestion {
+                id: Uuid::new_v4().to_string(),
+                title: s.title.trim().to_string(),
+                image_prompt: s.image_prompt.trim().to_string(),
+                overlay_text: s.overlay_text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                transcript_excerpt: s.transcript_excerpt.trim().to_string(),
+                start_ms,
+                end_ms,
+                ideal_display_ms,
+                bible_story: s.bible_story.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                rationale: s.rationale.trim().to_string(),
+            }
         })
         .collect();
 

@@ -45,6 +45,9 @@ export function SettingsPage() {
   const [grokImagineModel, setGrokImagineModel] = useState(
     project?.settings.grokImagineModel ?? "grok-imagine-image",
   );
+  const [transcriptTimingOffsetMs, setTranscriptTimingOffsetMs] = useState(
+    project?.settings.transcriptTimingOffsetMs ?? 0,
+  );
 
   useEffect(() => {
     isApiKeySet().then(setApiKeySet);
@@ -62,6 +65,7 @@ export function SettingsPage() {
     setGrokImagineModel(
       project.settings.grokImagineModel ?? "grok-imagine-image",
     );
+    setTranscriptTimingOffsetMs(project.settings.transcriptTimingOffsetMs ?? 0);
   }, [project]);
 
   async function handleSaveApiKey() {
@@ -168,6 +172,10 @@ export function SettingsPage() {
         showContext,
         openaiTextModel: textModel,
         grokImagineModel,
+        transcriptTimingOffsetMs: (() => {
+          const n = Number(transcriptTimingOffsetMs);
+          return Number.isFinite(n) ? Math.round(n) : 0;
+        })(),
       });
       setProject(manifest);
       setMessage("Project settings saved.");
@@ -328,6 +336,24 @@ export function SettingsPage() {
             placeholder="grok-imagine-image"
           />
         </label>
+        <label className="field">
+          Transcript timing offset (ms)
+          <input
+            type="number"
+            step={50}
+            value={transcriptTimingOffsetMs}
+            onChange={(e) =>
+              setTranscriptTimingOffsetMs(Number(e.target.value))
+            }
+          />
+        </label>
+        <p className="muted settings-note">
+          If overlay times line up slightly <em>before</em> the speech in your editor,
+          FFmpeg is still extracting full audio from the start of the file (no silence trim), and Parakeet
+          timestamps span the whole clip—try a positive offset here (e.g. 200–800). Save, then transcribe again.
+          Exported transcripts also store ffprobe <code>start_time</code> per stream under{" "}
+          <code>probedVideoStreamStartSec</code> / <code>probedAudioStreamStartSec</code> for debugging.
+        </p>
         <p className="muted settings-note">
           Overlay script analysis uses the OpenAI text model. The Grok Imagine model is used on the
           Images page for each overlay prompt.

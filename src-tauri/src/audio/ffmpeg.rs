@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tauri::{AppHandle, Emitter};
 use tokio::process::Command as TokioCommand;
@@ -62,6 +63,95 @@ pub fn resolve_ffmpeg_executable() -> Result<PathBuf, String> {
 pub fn check_ffmpeg() -> Result<String, String> {
     let path = resolve_ffmpeg_executable()?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Locate `ffprobe` next to FFmpeg or on PATH.
+pub fn resolve_ffprobe_executable() -> Result<PathBuf, String> {
+    if let Ok(path) = which::which("ffprobe") {
+        return Ok(path);
+    }
+
+    let ffmpeg = resolve_ffmpeg_executable()?;
+    let dir = ffmpeg
+        .parent()
+        .ok_or_else(|| "resolve_ffprobe: FFmpeg path has no parent directory".to_string())?;
+    #[cfg(windows)]
+    {
+        let candidate = dir.join("ffprobe.exe");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let candidate = dir.join("ffprobe");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "ffprobe was not found. It is usually installed next to ffmpeg. \
+         Install FFmpeg (which includes ffprobe), add it to PATH, then restart DevotionTime."
+            .to_string(),
+    )
+}
+
+fn parse_json_stream_time(v: &serde_json::Value) -> Option<f64> {
+    if let Some(s) = v.as_str() {
+        return s.trim().parse().ok();
+    }
+    v.as_f64()
+}
+
+/// First video and first audio stream `start_time` (seconds) from container metadata.
+/// Returns `(None, None)` if unavailable. Full audio is still extracted from t=0 of the stream;
+/// Parakeet does not strip leading silence in our pipeline.
+pub fn probe_av_stream_start_times(video_path: &str) -> (Option<f64>, Option<f64>) {
+    let ffprobe = match resolve_ffprobe_executable() {
+        Ok(p) => p,
+        Err(_) => return (None, None),
+    };
+
+    let output = match Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-i",
+            video_path,
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return (None, None),
+    };
+
+    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+
+    let Some(streams) = json.get("streams").and_then(|s| s.as_array()) else {
+        return (None, None);
+    };
+
+    let mut video_st: Option<f64> = None;
+    let mut audio_st: Option<f64> = None;
+
+    for s in streams {
+        let codec = s.get("codec_type").and_then(|c| c.as_str());
+        let st = s.get("start_time").and_then(parse_json_stream_time);
+        match codec {
+            Some("video") if video_st.is_none() => video_st = st,
+            Some("audio") if audio_st.is_none() => audio_st = st,
+            _ => {}
+        }
+    }
+
+    (video_st, audio_st)
 }
 
 pub async fn extract_audio_for_transcription(

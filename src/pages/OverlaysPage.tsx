@@ -87,6 +87,11 @@ export function OverlaysPage() {
     return `${formatTime(startMs)}–${formatTime(endMs)}`;
   }
 
+  function formatIdealDisplay(ms?: number) {
+    if (ms === undefined) return "—";
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
   return (
     <section className="page">
       <header className="page-header">
@@ -171,6 +176,7 @@ export function OverlaysPage() {
                     <thead>
                       <tr>
                         <th>Time</th>
+                        <th>Suggested on-screen</th>
                         <th>Title</th>
                         <th>Image prompt</th>
                         <th>On-screen text</th>
@@ -183,6 +189,7 @@ export function OverlaysPage() {
                       {analysis.suggestions.map((s) => (
                         <tr key={s.id}>
                           <td>{formatTimeRange(s.startMs, s.endMs)}</td>
+                          <td>{formatIdealDisplay(s.idealDisplayMs)}</td>
                           <td className="title-cell">{s.title}</td>
                           <td className="prompt-cell">{s.imagePrompt}</td>
                           <td>{s.overlayText ?? "—"}</td>
