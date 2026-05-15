@@ -12,6 +12,7 @@ use crate::store::project::{
 use crate::store::secrets::get_xai_api_key;
 use crate::types::{
     GeneratedOverlayImage, ImageGenerationProgress, OverlayImagesManifest, ProjectSettings,
+    DEFAULT_GROK_IMAGINE_MODEL,
 };
 
 fn sanitize_filename_component(id: &str) -> String {
@@ -79,7 +80,7 @@ pub async fn generate_overlay_images_for_video(
 
     let model = settings.grok_imagine_model.trim();
     let model = if model.is_empty() {
-        "grok-imagine-image-quality"
+        DEFAULT_GROK_IMAGINE_MODEL
     } else {
         model
     };

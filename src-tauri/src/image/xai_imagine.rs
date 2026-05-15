@@ -33,6 +33,7 @@ pub async fn generate_imagine_png(
         "prompt": trimmed,
         "n": 1,
         "response_format": "b64_json",
+        "aspect_ratio": "16:9",
     });
 
     let client = reqwest::Client::builder()

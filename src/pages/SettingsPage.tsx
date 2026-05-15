@@ -43,7 +43,7 @@ export function SettingsPage() {
     project?.settings.openaiTextModel ?? "gpt-4.1-mini",
   );
   const [grokImagineModel, setGrokImagineModel] = useState(
-    project?.settings.grokImagineModel ?? "grok-imagine-image-quality",
+    project?.settings.grokImagineModel ?? "grok-imagine-image",
   );
 
   useEffect(() => {
@@ -60,7 +60,7 @@ export function SettingsPage() {
     setShowContext(project.settings.showContext);
     setTextModel(project.settings.openaiTextModel);
     setGrokImagineModel(
-      project.settings.grokImagineModel ?? "grok-imagine-image-quality",
+      project.settings.grokImagineModel ?? "grok-imagine-image",
     );
   }, [project]);
 
@@ -325,7 +325,7 @@ export function SettingsPage() {
           <input
             value={grokImagineModel}
             onChange={(e) => setGrokImagineModel(e.target.value)}
-            placeholder="grok-imagine-image-quality"
+            placeholder="grok-imagine-image"
           />
         </label>
         <p className="muted settings-note">

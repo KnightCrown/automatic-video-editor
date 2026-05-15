@@ -26,7 +26,10 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 4. ignore `.env` changes in dev — Vite restarts the full server when .env is touched.
+      //    Some tools / cloud sync / antivirus rewrite .env repeatedly and cause a restart storm.
+      //    Restart `npm run tauri dev` manually after you change environment files.
+      ignored: ["**/src-tauri/**", "**/.env", "**/.env.*", "**/.env.local"],
     },
   },
 }));

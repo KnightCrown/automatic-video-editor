@@ -162,13 +162,19 @@ pub struct ProjectSettings {
     pub openai_text_model: String,
     pub openai_image_model: String,
     pub image_provider: String,
-    /// xAI Grok Imagine model id (e.g. grok-imagine-image-quality).
+    /// xAI Grok Imagine model id (see [`DEFAULT_GROK_IMAGINE_MODEL`]).
     #[serde(default = "default_grok_imagine_model")]
     pub grok_imagine_model: String,
 }
 
+/// Default xAI Grok Imagine model for overlay image generation.
+pub const DEFAULT_GROK_IMAGINE_MODEL: &str = "grok-imagine-image";
+
+/// Previously shipped default; migrate saved projects to [`DEFAULT_GROK_IMAGINE_MODEL`].
+pub const LEGACY_GROK_IMAGINE_MODEL_QUALITY: &str = "grok-imagine-image-quality";
+
 fn default_grok_imagine_model() -> String {
-    "grok-imagine-image-quality".to_string()
+    DEFAULT_GROK_IMAGINE_MODEL.to_string()
 }
 
 impl Default for ProjectSettings {

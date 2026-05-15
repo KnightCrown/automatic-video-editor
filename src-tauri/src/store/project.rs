@@ -9,6 +9,7 @@ use crate::types::{
     OverlayCandidate, OverlayCandidateStatus, ProjectManifest, ProjectSettings, Transcript,
     TranscriptAnalysis, VideoJob,
     OverlayImagesManifest,
+    DEFAULT_GROK_IMAGINE_MODEL, LEGACY_GROK_IMAGINE_MODEL_QUALITY,
 };
 
 pub const DEVOTIONTIME_DIR: &str = ".devotiontime";
@@ -68,7 +69,15 @@ pub fn load_project(root: &str) -> Result<ProjectManifest, String> {
         });
     }
     let raw = fs::read_to_string(&paths.meta).map_err(|e| format!("read_project_failed:{}", e))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse_project_failed:{}", e))
+    let mut manifest: ProjectManifest =
+        serde_json::from_str(&raw).map_err(|e| format!("parse_project_failed:{}", e))?;
+
+    if manifest.settings.grok_imagine_model == LEGACY_GROK_IMAGINE_MODEL_QUALITY {
+        manifest.settings.grok_imagine_model = DEFAULT_GROK_IMAGINE_MODEL.to_string();
+        let _ = save_project(&manifest);
+    }
+
+    Ok(manifest)
 }
 
 pub fn save_project(manifest: &ProjectManifest) -> Result<(), String> {
