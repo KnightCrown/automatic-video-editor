@@ -19,16 +19,21 @@ export function OverlaysPage() {
     Record<string, TranscriptAnalysis | null>
   >({});
 
-  const transcribedVideos =
-    project?.videos.filter((v) => v.status === "transcribed") ?? [];
+  const transcribedVideos = useMemo(
+    () => project?.videos.filter((v) => v.status === "transcribed") ?? [],
+    [project?.videos],
+  );
 
   useEffect(() => {
     isApiKeySet().then(setApiKeySet);
   }, []);
 
   const loadAnalyses = useCallback(async () => {
-    if (!project || transcribedVideos.length === 0) {
-      setAnalysisByVideo({});
+    if (!project) return;
+    if (transcribedVideos.length === 0) {
+      setAnalysisByVideo((prev) =>
+        Object.keys(prev).length === 0 ? prev : {},
+      );
       return;
     }
     const entries = await Promise.all(

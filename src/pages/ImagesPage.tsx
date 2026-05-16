@@ -29,8 +29,10 @@ export function ImagesPage() {
   const [progress, setProgress] = useState<ImageGenerationProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const transcribedVideos =
-    project?.videos.filter((v) => v.status === "transcribed") ?? [];
+  const transcribedVideos = useMemo(
+    () => project?.videos.filter((v) => v.status === "transcribed") ?? [],
+    [project?.videos],
+  );
   const rootPath = project?.rootPath ?? "";
 
   useEffect(() => {
@@ -38,9 +40,14 @@ export function ImagesPage() {
   }, []);
 
   const refreshManifestsAndAnalysis = useCallback(async () => {
-    if (!project || transcribedVideos.length === 0) {
-      setManifestByVideo({});
-      setAnalysisOkByVideo({});
+    if (!project) return;
+    if (transcribedVideos.length === 0) {
+      setManifestByVideo((prev) =>
+        Object.keys(prev).length === 0 ? prev : {},
+      );
+      setAnalysisOkByVideo((prev) =>
+        Object.keys(prev).length === 0 ? prev : {},
+      );
       return;
     }
     const manEntries = await Promise.all(
