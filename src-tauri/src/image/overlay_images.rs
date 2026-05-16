@@ -24,7 +24,35 @@ fn sanitize_filename_component(id: &str) -> String {
         .collect()
 }
 
-/// Read a project-relative file and return a data URL for the webview.
+/// Normalize path for `convertFileSrc` (strip Windows `\\?\` prefix).
+fn path_for_asset_url(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
+/// Absolute filesystem path for a project-relative image (for `convertFileSrc` in the webview).
+pub fn resolve_project_image_absolute_path(
+    root_path: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    if relative_path.contains("..") {
+        return Err("invalid_relative_path".to_string());
+    }
+    let root = PathBuf::from(root_path);
+    let rel = relative_path.trim().trim_start_matches("./");
+    let full = root.join(rel);
+    if !full.is_file() {
+        return Err(format!("image_not_found:{}", full.display()));
+    }
+    let canon = fs::canonicalize(&full).map_err(|e| format!("canonicalize_image:{e}"))?;
+    Ok(path_for_asset_url(&canon))
+}
+
+/// Read file as base64 data URL (legacy; large images can exceed IPC limits — prefer [`resolve_project_image_absolute_path`] + `convertFileSrc`).
 pub fn read_project_image_data_url(root_path: &str, relative_path: &str) -> Result<String, String> {
     if relative_path.contains("..") {
         return Err("invalid_relative_path".to_string());

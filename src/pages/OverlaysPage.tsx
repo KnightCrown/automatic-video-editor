@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { useProject } from "../context/ProjectContext";
+import { EpisodeAccordion, type EpisodePanelSpec } from "../components/EpisodeAccordion";
 import {
   analyzeTranscriptWithOpenai,
   getTranscriptAnalysis,
@@ -9,11 +11,13 @@ import type { TranscriptAnalysis } from "../types/pipeline";
 
 export function OverlaysPage() {
   const { project } = useProject();
-  const [selectedVideoId, setSelectedVideoId] = useState<string>("");
-  const [analysis, setAnalysis] = useState<TranscriptAnalysis | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
+  const location = useLocation();
+  const [analyzingVideoId, setAnalyzingVideoId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [apiKeySet, setApiKeySet] = useState<boolean | null>(null);
+  const [analysisByVideo, setAnalysisByVideo] = useState<
+    Record<string, TranscriptAnalysis | null>
+  >({});
 
   const transcribedVideos =
     project?.videos.filter((v) => v.status === "transcribed") ?? [];
@@ -22,21 +26,69 @@ export function OverlaysPage() {
     isApiKeySet().then(setApiKeySet);
   }, []);
 
-  useEffect(() => {
-    if (!selectedVideoId && transcribedVideos.length > 0) {
-      setSelectedVideoId(transcribedVideos[0].id);
-    }
-  }, [transcribedVideos, selectedVideoId]);
-
-  useEffect(() => {
-    if (!project || !selectedVideoId) {
-      setAnalysis(null);
+  const loadAnalyses = useCallback(async () => {
+    if (!project || transcribedVideos.length === 0) {
+      setAnalysisByVideo({});
       return;
     }
-    getTranscriptAnalysis(project.rootPath, selectedVideoId)
-      .then(setAnalysis)
-      .catch((err) => setError(String(err)));
-  }, [project, selectedVideoId]);
+    const entries = await Promise.all(
+      transcribedVideos.map(async (v) => {
+        const a = await getTranscriptAnalysis(project.rootPath, v.id);
+        return [v.id, a] as const;
+      }),
+    );
+    setAnalysisByVideo(Object.fromEntries(entries));
+  }, [project, transcribedVideos, location.pathname]);
+
+  useEffect(() => {
+    void loadAnalyses();
+  }, [loadAnalyses]);
+
+  const handleAnalyze = useCallback(
+    async (videoId: string) => {
+      if (!project) return;
+      setAnalyzingVideoId(videoId);
+      setError(null);
+      const keyReady = await isApiKeySet();
+      setApiKeySet(keyReady);
+      if (!keyReady) {
+        setError(
+          "OpenAI API key is not set. Open Settings, enter your key, and click Save API key.",
+        );
+        setAnalyzingVideoId(null);
+        return;
+      }
+      try {
+        const result = await analyzeTranscriptWithOpenai(
+          project.rootPath,
+          videoId,
+        );
+        setAnalysisByVideo((prev) => ({ ...prev, [videoId]: result }));
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setAnalyzingVideoId(null);
+      }
+    },
+    [project],
+  );
+
+  const panels: EpisodePanelSpec[] = useMemo(
+    () =>
+      transcribedVideos.map((v) => ({
+        id: v.id,
+        title: v.fileName,
+        subtitle: v.status,
+        renderContent: () => (
+          <OverlaysEpisodeBody
+            analysis={analysisByVideo[v.id] ?? null}
+            analyzing={analyzingVideoId === v.id}
+            onAnalyze={() => handleAnalyze(v.id)}
+          />
+        ),
+      })),
+    [transcribedVideos, analysisByVideo, analyzingVideoId, handleAnalyze],
+  );
 
   if (!project) {
     return (
@@ -46,34 +98,45 @@ export function OverlaysPage() {
     );
   }
 
-  const rootPath = project.rootPath;
+  return (
+    <section className="page">
+      <header className="page-header">
+        <h1>Overlays</h1>
+        <p>
+          Review OpenAI overlay suggestions per episode. Expand an episode to analyze or read
+          results. Generate images on the <strong>Images</strong> tab after analysis.
+        </p>
+      </header>
 
-  async function handleAnalyze() {
-    if (!selectedVideoId) return;
-    setAnalyzing(true);
-    setError(null);
-    const keyReady = await isApiKeySet();
-    setApiKeySet(keyReady);
-    if (!keyReady) {
-      setError(
-        "OpenAI API key is not set. Open Settings, enter your key, and click Save API key.",
-      );
-      setAnalyzing(false);
-      return;
-    }
-    try {
-      const result = await analyzeTranscriptWithOpenai(
-        rootPath,
-        selectedVideoId,
-      );
-      setAnalysis(result);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setAnalyzing(false);
-    }
-  }
+      {transcribedVideos.length === 0 ? (
+        <p className="muted">Transcribe videos first, then analyze the script here.</p>
+      ) : (
+        <>
+          {apiKeySet === false && (
+            <p className="error">
+              OpenAI API key is not set. Open <strong>Settings</strong>, save your API key, then
+              return here.
+            </p>
+          )}
 
+          {error && <p className="error">{error}</p>}
+
+          <EpisodeAccordion panels={panels} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function OverlaysEpisodeBody({
+  analysis,
+  analyzing,
+  onAnalyze,
+}: {
+  analysis: TranscriptAnalysis | null;
+  analyzing: boolean;
+  onAnalyze: () => void;
+}) {
   function formatTime(ms?: number) {
     if (ms === undefined) return "—";
     const sec = Math.floor(ms / 1000);
@@ -93,126 +156,90 @@ export function OverlaysPage() {
   }
 
   return (
-    <section className="page">
-      <header className="page-header">
-        <h1>Overlays</h1>
-        <p>
-          Review OpenAI overlay suggestions from the full transcript (text only). Generate images
-          on the Images tab after analysis.
-        </p>
-      </header>
+    <>
+      <div className="actions-row" style={{ marginBottom: "1rem" }}>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={analyzing}
+          onClick={onAnalyze}
+        >
+          {analyzing ? "Analyzing transcript…" : "Analyze transcript with OpenAI"}
+        </button>
+      </div>
 
-      {transcribedVideos.length === 0 ? (
-        <p className="muted">Transcribe videos first, then analyze the script here.</p>
-      ) : (
+      {analyzing && (
+        <div className="card loading-card">
+          <div className="spinner" aria-hidden />
+          <p>Sending full transcript to OpenAI. This may take a minute…</p>
+        </div>
+      )}
+
+      {analysis && !analyzing && (
         <>
-          {apiKeySet === false && (
-            <p className="error">
-              OpenAI API key is not set. Open <strong>Settings</strong>, save your API key, then
-              return here.
+          <div className="card meta-card">
+            <p className="muted">
+              Last analyzed: {new Date(analysis.analyzedAt).toLocaleString()} · Model:{" "}
+              {analysis.model}
             </p>
-          )}
-
-          <div className="card actions-row">
-            <label className="field-inline">
-              Video
-              <select
-                value={selectedVideoId}
-                onChange={(e) => setSelectedVideoId(e.target.value)}
-                disabled={analyzing}
-              >
-                {transcribedVideos.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.fileName}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="btn primary"
-              disabled={analyzing || !selectedVideoId}
-              onClick={handleAnalyze}
-            >
-              {analyzing ? "Analyzing transcript…" : "Analyze transcript with OpenAI"}
-            </button>
           </div>
 
-          {analyzing && (
-            <div className="card loading-card">
-              <div className="spinner" aria-hidden />
-              <p>Sending full transcript to OpenAI. This may take a minute…</p>
+          {analysis.bibleStories.length > 0 && (
+            <div className="card">
+              <h2>Bible stories discussed</h2>
+              <ul className="story-list">
+                {analysis.bibleStories.map((story) => (
+                  <li key={story}>{story}</li>
+                ))}
+              </ul>
             </div>
           )}
 
-          {error && <p className="error">{error}</p>}
-
-          {analysis && !analyzing && (
-            <>
-              <div className="card meta-card">
-                <p className="muted">
-                  Last analyzed: {new Date(analysis.analyzedAt).toLocaleString()} · Model:{" "}
-                  {analysis.model}
-                </p>
-              </div>
-
-              {analysis.bibleStories.length > 0 && (
-                <div className="card">
-                  <h2>Bible stories discussed</h2>
-                  <ul className="story-list">
-                    {analysis.bibleStories.map((story) => (
-                      <li key={story}>{story}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <div className="card">
-                <h2>Overlay suggestions ({analysis.suggestions.length})</h2>
-                {analysis.suggestions.length === 0 ? (
-                  <p className="muted">No overlay moments suggested for this video.</p>
-                ) : (
-                  <table className="data-table suggestions-table">
-                    <thead>
-                      <tr>
-                        <th>Time</th>
-                        <th>Suggested on-screen</th>
-                        <th>Title</th>
-                        <th>Image prompt</th>
-                        <th>On-screen text</th>
-                        <th>Story</th>
-                        <th>Excerpt</th>
-                        <th>Rationale</th>
+          <div className="card">
+            <h2>Overlay suggestions ({analysis.suggestions.length})</h2>
+            {analysis.suggestions.length === 0 ? (
+              <p className="muted">No overlay moments suggested for this video.</p>
+            ) : (
+              <div className="table-scroll">
+                <table className="data-table suggestions-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Suggested on-screen</th>
+                      <th>Title</th>
+                      <th>Image prompt</th>
+                      <th>On-screen text</th>
+                      <th>Story</th>
+                      <th>Excerpt</th>
+                      <th>Rationale</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analysis.suggestions.map((s) => (
+                      <tr key={s.id}>
+                        <td>{formatTimeRange(s.startMs, s.endMs)}</td>
+                        <td>{formatIdealDisplay(s.idealDisplayMs)}</td>
+                        <td className="title-cell">{s.title}</td>
+                        <td className="prompt-cell">{s.imagePrompt}</td>
+                        <td>{s.overlayText ?? "—"}</td>
+                        <td>{s.bibleStory ?? "—"}</td>
+                        <td className="excerpt-cell">{s.transcriptExcerpt}</td>
+                        <td className="rationale-cell">{s.rationale}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {analysis.suggestions.map((s) => (
-                        <tr key={s.id}>
-                          <td>{formatTimeRange(s.startMs, s.endMs)}</td>
-                          <td>{formatIdealDisplay(s.idealDisplayMs)}</td>
-                          <td className="title-cell">{s.title}</td>
-                          <td className="prompt-cell">{s.imagePrompt}</td>
-                          <td>{s.overlayText ?? "—"}</td>
-                          <td>{s.bibleStory ?? "—"}</td>
-                          <td className="excerpt-cell">{s.transcriptExcerpt}</td>
-                          <td className="rationale-cell">{s.rationale}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </>
-          )}
-
-          {!analysis && !analyzing && !error && (
-            <p className="muted">
-              No analysis yet. Click &quot;Analyze transcript with OpenAI&quot; to review
-              suggestions.
-            </p>
-          )}
+            )}
+          </div>
         </>
       )}
-    </section>
+
+      {!analysis && !analyzing && (
+        <p className="muted">
+          No analysis yet. Click <em>Analyze transcript with OpenAI</em> to review suggestions.
+        </p>
+      )}
+    </>
   );
 }

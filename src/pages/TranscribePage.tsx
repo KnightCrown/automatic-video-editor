@@ -184,8 +184,7 @@ export function TranscribePage() {
             <tr>
               <th>Video</th>
               <th>Status</th>
-              <th>Error</th>
-              <th />
+              <th className="actions-cell">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -195,46 +194,44 @@ export function TranscribePage() {
                 className={video.status === "failed" ? "row-failed" : undefined}
               >
                 <td>{video.fileName}</td>
-                <td>
-                  <span className={`status-pill status-${video.status}`}>
-                    {video.status}
-                  </span>
+                <td className="status-cell">
+                  <div className="status-cell-stack">
+                    <span className={`status-pill status-${video.status}`}>
+                      {video.status}
+                    </span>
+                    {video.error ? (
+                      <div className="error-detail">
+                        {errorStageLabel(video.error) && (
+                          <span className="error-stage">
+                            {errorStageLabel(video.error)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() =>
+                            setExpandedErrorId(
+                              expandedErrorId === video.id ? null : video.id,
+                            )
+                          }
+                        >
+                          {expandedErrorId === video.id ? "Hide details" : "Show details"}
+                        </button>
+                        {expandedErrorId === video.id && (
+                          <pre className="error-pre">
+                            {formatTranscriptionError(video.error)}
+                          </pre>
+                        )}
+                        {expandedErrorId !== video.id && (
+                          <p className="error-summary">
+                            {formatTranscriptionError(video.error)}
+                          </p>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                 </td>
-                <td className="error-detail-cell">
-                  {video.error ? (
-                    <div className="error-detail">
-                      {errorStageLabel(video.error) && (
-                        <span className="error-stage">
-                          {errorStageLabel(video.error)}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() =>
-                          setExpandedErrorId(
-                            expandedErrorId === video.id ? null : video.id,
-                          )
-                        }
-                      >
-                        {expandedErrorId === video.id ? "Hide details" : "Show details"}
-                      </button>
-                      {expandedErrorId === video.id && (
-                        <pre className="error-pre">
-                          {formatTranscriptionError(video.error)}
-                        </pre>
-                      )}
-                      {expandedErrorId !== video.id && (
-                        <p className="error-summary">
-                          {formatTranscriptionError(video.error)}
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td>
+                <td className="actions-cell">
                   {video.status === "transcribed" && (
                     <span className="muted">Saved transcript</span>
                   )}

@@ -122,6 +122,11 @@ fn get_overlay_images_manifest(
 }
 
 #[tauri::command]
+fn resolve_overlay_image_path(root_path: String, relative_path: String) -> Result<String, String> {
+    overlay_images::resolve_project_image_absolute_path(&root_path, &relative_path)
+}
+
+#[tauri::command]
 fn read_overlay_image_data_url(
     root_path: String,
     relative_path: String,
@@ -301,6 +306,7 @@ pub fn run() {
             get_xai_api_key_storage_hint,
             generate_overlay_images,
             get_overlay_images_manifest,
+            resolve_overlay_image_path,
             read_overlay_image_data_url,
         ])
         .run(tauri::generate_context!())

@@ -72,26 +72,23 @@ export function ProjectsPage() {
               <tr>
                 <th>File</th>
                 <th>Status</th>
-                <th>Error</th>
               </tr>
             </thead>
             <tbody>
               {project.videos.map((video) => (
                 <tr key={video.id}>
                   <td>{video.fileName}</td>
-                  <td>
-                    <span className={`status-pill status-${video.status}`}>
-                      {video.status}
-                    </span>
-                  </td>
-                  <td className="error-detail-cell">
-                    {video.error ? (
-                      <span className="error-summary">
-                        {formatTranscriptionError(video.error)}
+                  <td className="status-cell">
+                    <div className="status-cell-stack">
+                      <span className={`status-pill status-${video.status}`}>
+                        {video.status}
                       </span>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
+                      {video.error ? (
+                        <p className="error-summary">
+                          {formatTranscriptionError(video.error)}
+                        </p>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}

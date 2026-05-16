@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ImageGenerationProgress,
@@ -150,6 +150,18 @@ export async function readOverlayImageDataUrl(
     rootPath,
     relativePath,
   });
+}
+
+/** Small IPC: absolute path from Rust, then webview loads bytes via the asset protocol (not base64). */
+export async function getOverlayImageDisplayUrl(
+  rootPath: string,
+  relativePath: string,
+): Promise<string> {
+  const abs = await invoke<string>("resolve_overlay_image_path", {
+    rootPath,
+    relativePath,
+  });
+  return convertFileSrc(abs);
 }
 
 export async function generateOverlayImages(
