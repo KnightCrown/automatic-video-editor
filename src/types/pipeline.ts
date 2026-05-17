@@ -112,6 +112,34 @@ export interface PipelineProgress {
   message?: string;
 }
 
+export type VideoExportMode = "auto" | "software" | "hardware";
+export type VideoExportQuality = "fast" | "balanced";
+
+export type VideoExportEncoderKind =
+  | "software"
+  | "nvenc"
+  | "qsv"
+  | "amf"
+  | "videoToolbox";
+
+export interface VideoExportEncoderInfo {
+  kind: VideoExportEncoderKind;
+  name: string;
+  listed: boolean;
+  verified: boolean;
+  error?: string;
+}
+
+export interface VideoExportPreflight {
+  ffmpegPath?: string;
+  ffmpegError?: string;
+  encoders: VideoExportEncoderInfo[];
+  recommendedEncoder?: VideoExportEncoderKind;
+  cudaOverlayAvailable: boolean;
+  overlayCudaFilter: boolean;
+  scaleCudaFilter: boolean;
+}
+
 export interface ProjectSettings {
   showContext: string;
   maxCandidatesPerVideo: number;
@@ -122,6 +150,10 @@ export interface ProjectSettings {
   grokImagineModel: string;
   /** Added to every timestamp after transcribe. Positive = shift later if cues are early. */
   transcriptTimingOffsetMs?: number;
+  /** auto | software | hardware */
+  videoExportMode?: VideoExportMode;
+  /** fast | balanced */
+  videoExportQuality?: VideoExportQuality;
 }
 
 export interface ProjectManifest {
@@ -145,3 +177,39 @@ export interface ParakeetDownloadProgress {
   fileIndex: number;
   fileCount: number;
 }
+
+export interface OverlayClipLayout {
+  anchor: string;
+  marginXPct: number;
+  marginYPct: number;
+  widthPct: number;
+}
+
+export interface VideoOverlayClip {
+  suggestionId: string;
+  imageRelativePath: string;
+  title: string;
+  startMs: number;
+  durationMs: number;
+  layout: OverlayClipLayout;
+}
+
+export interface FinalVideoTimeline {
+  videoId: string;
+  clips: VideoOverlayClip[];
+  updatedAt: string;
+}
+
+export interface VideoExportProgress {
+  videoId: string;
+  stage: string;
+  percent: number;
+  message?: string;
+}
+
+export const DEFAULT_OVERLAY_LAYOUT: OverlayClipLayout = {
+  anchor: "top-right",
+  marginXPct: 3,
+  marginYPct: 3,
+  widthPct: 38,
+};

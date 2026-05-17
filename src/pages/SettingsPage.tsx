@@ -4,6 +4,7 @@ import {
   clearApiKey,
   clearXaiApiKey,
   getApiKeyStorageHint,
+  getVideoExportPreflight,
   getXaiApiKeyStorageHint,
   isApiKeySet,
   isXaiApiKeySet,
@@ -17,7 +18,29 @@ import {
   getParakeetModelInfo,
   isParakeetModelReady,
 } from "../services/parakeetModelService";
-import type { ParakeetDownloadProgress, ParakeetModelFile } from "../types/pipeline";
+import type {
+  ParakeetDownloadProgress,
+  ParakeetModelFile,
+  VideoExportEncoderKind,
+  VideoExportMode,
+  VideoExportPreflight,
+  VideoExportQuality,
+} from "../types/pipeline";
+
+function encoderKindLabel(kind: VideoExportEncoderKind): string {
+  switch (kind) {
+    case "nvenc":
+      return "NVIDIA NVENC";
+    case "qsv":
+      return "Intel Quick Sync";
+    case "amf":
+      return "AMD AMF";
+    case "videoToolbox":
+      return "Apple VideoToolbox";
+    default:
+      return "Software (libx264)";
+  }
+}
 
 export function SettingsPage() {
   const { project, setProject } = useProject();
@@ -48,6 +71,15 @@ export function SettingsPage() {
   const [transcriptTimingOffsetMs, setTranscriptTimingOffsetMs] = useState(
     project?.settings.transcriptTimingOffsetMs ?? 0,
   );
+  const [videoExportMode, setVideoExportMode] = useState<VideoExportMode>(
+    project?.settings.videoExportMode ?? "auto",
+  );
+  const [videoExportQuality, setVideoExportQuality] = useState<VideoExportQuality>(
+    project?.settings.videoExportQuality ?? "balanced",
+  );
+  const [exportPreflight, setExportPreflight] = useState<VideoExportPreflight | null>(
+    null,
+  );
 
   useEffect(() => {
     isApiKeySet().then(setApiKeySet);
@@ -56,6 +88,7 @@ export function SettingsPage() {
     getXaiApiKeyStorageHint().then(setXaiKeyStorageHint);
     isParakeetModelReady().then(setModelReady);
     getParakeetModelInfo().then(setModelFiles);
+    getVideoExportPreflight().then(setExportPreflight).catch(() => setExportPreflight(null));
   }, []);
 
   useEffect(() => {
@@ -66,6 +99,8 @@ export function SettingsPage() {
       project.settings.grokImagineModel ?? "grok-imagine-image",
     );
     setTranscriptTimingOffsetMs(project.settings.transcriptTimingOffsetMs ?? 0);
+    setVideoExportMode(project.settings.videoExportMode ?? "auto");
+    setVideoExportQuality(project.settings.videoExportQuality ?? "balanced");
   }, [project]);
 
   async function handleSaveApiKey() {
@@ -176,6 +211,8 @@ export function SettingsPage() {
           const n = Number(transcriptTimingOffsetMs);
           return Number.isFinite(n) ? Math.round(n) : 0;
         })(),
+        videoExportMode,
+        videoExportQuality,
       });
       setProject(manifest);
       setMessage("Project settings saved.");
@@ -309,6 +346,87 @@ export function SettingsPage() {
             Clear
           </button>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>Video export</h2>
+        <p className="muted">
+          Hardware encoding speeds up final export. NVIDIA systems can also use CUDA overlays when
+          FFmpeg includes <code>overlay_cuda</code> (e.g. Gyan.FFmpeg via winget). Export falls back
+          automatically if a path fails.
+        </p>
+        {exportPreflight?.ffmpegPath ? (
+          <p className="muted">
+            FFmpeg: <code>{exportPreflight.ffmpegPath}</code>
+          </p>
+        ) : null}
+        {exportPreflight?.ffmpegError ? (
+          <p className="error">{exportPreflight.ffmpegError}</p>
+        ) : null}
+        {exportPreflight ? (
+          <>
+            <p>
+              Recommended:{" "}
+              <strong>
+                {exportPreflight.recommendedEncoder
+                  ? encoderKindLabel(exportPreflight.recommendedEncoder)
+                  : "Software (libx264)"}
+              </strong>
+              {exportPreflight.cudaOverlayAvailable ? (
+                <span className="muted"> · CUDA overlays available</span>
+              ) : null}
+            </p>
+            <ul className="file-list">
+              {exportPreflight.encoders.map((e) => (
+                <li key={e.name}>
+                  {e.name}:{" "}
+                  {e.listed
+                    ? e.verified
+                      ? "ready"
+                      : `listed but failed (${e.error ?? "smoke test"})`
+                    : "not in FFmpeg build"}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="muted">Checking encoders…</p>
+        )}
+        <label className="field">
+          Export mode
+          <select
+            value={videoExportMode}
+            onChange={(e) => setVideoExportMode(e.target.value as VideoExportMode)}
+          >
+            <option value="auto">Auto (recommended)</option>
+            <option value="hardware">Force hardware</option>
+            <option value="software">Force software (libx264)</option>
+          </select>
+        </label>
+        <label className="field">
+          Export quality
+          <select
+            value={videoExportQuality}
+            onChange={(e) =>
+              setVideoExportQuality(e.target.value as VideoExportQuality)
+            }
+          >
+            <option value="balanced">Balanced</option>
+            <option value="fast">Fast</option>
+          </select>
+        </label>
+        <p className="muted settings-note">
+          Balanced targets similar quality to the previous export defaults. Fast uses lighter GPU/CPU
+          presets. If hardware export fails, the app retries with CPU overlays and software encoding.
+        </p>
+        {!project ? (
+          <p className="muted">Open a project to save export settings with the project.</p>
+        ) : (
+          <p className="muted settings-note">
+            Use <strong>Save project settings</strong> in Show &amp; pipeline to persist export mode
+            and quality.
+          </p>
+        )}
       </div>
 
       <div className="card">

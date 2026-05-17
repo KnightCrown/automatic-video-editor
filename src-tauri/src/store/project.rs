@@ -6,9 +6,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    OverlayCandidate, OverlayCandidateStatus, ProjectManifest, ProjectSettings, Transcript,
-    TranscriptAnalysis, VideoJob,
-    OverlayImagesManifest,
+    FinalVideoTimeline, OverlayCandidate, OverlayCandidateStatus, ProjectManifest,
+    ProjectSettings, Transcript, TranscriptAnalysis, VideoJob, OverlayImagesManifest,
     DEFAULT_GROK_IMAGINE_MODEL, LEGACY_GROK_IMAGINE_MODEL_QUALITY,
 };
 
@@ -122,6 +121,39 @@ pub fn overlay_images_manifest_path(paths: &ProjectPaths, video_id: &str) -> Res
     Ok(devotiontime_base(paths)?
         .join("images")
         .join(format!("{video_id}.manifest.json")))
+}
+
+pub fn final_video_timeline_path(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+    Ok(devotiontime_base(paths)?
+        .join("final-video")
+        .join(format!("{video_id}.timeline.json")))
+}
+
+pub fn save_final_video_timeline(
+    paths: &ProjectPaths,
+    timeline: &FinalVideoTimeline,
+) -> Result<(), String> {
+    let path = final_video_timeline_path(paths, &timeline.video_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_final_video_dir:{e}"))?;
+    }
+    let raw = serde_json::to_string_pretty(timeline)
+        .map_err(|e| format!("serialize_final_video_timeline:{e}"))?;
+    fs::write(&path, raw).map_err(|e| format!("write_final_video_timeline:{e}"))
+}
+
+pub fn load_final_video_timeline(
+    paths: &ProjectPaths,
+    video_id: &str,
+) -> Result<Option<FinalVideoTimeline>, String> {
+    let path = final_video_timeline_path(paths, video_id)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read_final_video_timeline:{e}"))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("parse_final_video_timeline:{e}"))
 }
 
 pub fn save_overlay_images_manifest(

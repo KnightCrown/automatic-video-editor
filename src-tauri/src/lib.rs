@@ -6,6 +6,7 @@ mod llm;
 mod pipeline;
 mod store;
 mod types;
+mod video;
 
 use crate::asr::{
     default_model_files, delete_parakeet_model, download_parakeet_model, invalidate_transcriber,
@@ -20,17 +21,21 @@ use crate::image::overlay_images;
 use crate::pipeline::jobs::ensure_model_and_run;
 use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
-    load_overlay_images_manifest, load_project, load_transcript, load_transcript_analysis,
-    load_transcript_for_video, project_paths, save_project, save_transcript_analysis,
-    sync_videos_in_manifest,
+    load_overlay_images_manifest, load_project, load_transcript,
+    load_transcript_analysis, load_transcript_for_video, project_paths, save_final_video_timeline,
+    save_project, save_transcript_analysis, sync_videos_in_manifest,
 };
+use crate::video::composite::export_video_with_overlays;
+use crate::video::export_session::VideoExportController;
+use crate::video::timeline::{build_default_timeline, resolve_final_video_timeline};
 use crate::store::secrets::{
     clear_xai_api_key, has_xai_api_key, save_xai_api_key, xai_api_key_storage_hint,
 };
 use crate::types::{
-    OverlayImagesManifest, ProjectManifest, ProjectSettings, Transcript, TranscriptAnalysis,
-    TranscriptionPreflight,
+    FinalVideoTimeline, OverlayImagesManifest, ProjectManifest, ProjectSettings, Transcript,
+    TranscriptAnalysis, TranscriptionPreflight, VideoExportPreflight,
 };
+use crate::video::encoders::refresh_video_export_preflight_cache;
 
 #[tauri::command]
 fn get_parakeet_model_info() -> Vec<ParakeetModelFile> {
@@ -275,6 +280,77 @@ fn get_transcript_analysis(
     load_transcript_analysis(&paths, &video_id)
 }
 
+#[tauri::command]
+fn get_final_video_timeline(
+    root_path: String,
+    video_id: String,
+) -> Result<FinalVideoTimeline, String> {
+    resolve_final_video_timeline(&root_path, &video_id)
+}
+
+#[tauri::command]
+fn rebuild_final_video_timeline(
+    root_path: String,
+    video_id: String,
+) -> Result<FinalVideoTimeline, String> {
+    let paths = project_paths(&root_path)?;
+    let timeline = build_default_timeline(&root_path, &video_id)?;
+    save_final_video_timeline(&paths, &timeline)?;
+    Ok(timeline)
+}
+
+#[tauri::command]
+fn save_final_video_timeline_cmd(
+    root_path: String,
+    timeline: FinalVideoTimeline,
+) -> Result<(), String> {
+    let paths = project_paths(&root_path)?;
+    let mut timeline = timeline;
+    timeline.updated_at = chrono::Utc::now().to_rfc3339();
+    save_final_video_timeline(&paths, &timeline)
+}
+
+#[tauri::command]
+fn get_video_export_preflight() -> VideoExportPreflight {
+    refresh_video_export_preflight_cache()
+}
+
+#[tauri::command]
+async fn cancel_video_export(
+    video_id: String,
+    controller: tauri::State<'_, VideoExportController>,
+) -> Result<bool, String> {
+    Ok(controller.request_cancel(&video_id).await)
+}
+
+#[tauri::command]
+async fn export_video_with_overlays_cmd(
+    app: tauri::AppHandle,
+    controller: tauri::State<'_, VideoExportController>,
+    root_path: String,
+    video_id: String,
+    output_path: String,
+    clips: Vec<crate::types::VideoOverlayClip>,
+) -> Result<String, String> {
+    let manifest = load_project(&root_path)?;
+    let video = manifest
+        .videos
+        .iter()
+        .find(|v| v.id == video_id)
+        .ok_or_else(|| "video_not_found".to_string())?;
+    export_video_with_overlays(
+        app,
+        &controller,
+        root_path,
+        manifest.settings,
+        video.path.clone(),
+        video_id,
+        output_path,
+        clips,
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -282,6 +358,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(VideoExportController::new())
         .invoke_handler(tauri::generate_handler![
             get_parakeet_model_info,
             check_parakeet_model_ready,
@@ -295,6 +372,7 @@ pub fn run() {
             get_project,
             update_project_settings,
             get_transcription_preflight,
+            get_video_export_preflight,
             run_transcription,
             retry_video_transcription,
             get_transcript,
@@ -308,6 +386,11 @@ pub fn run() {
             get_overlay_images_manifest,
             resolve_overlay_image_path,
             read_overlay_image_data_url,
+            get_final_video_timeline,
+            rebuild_final_video_timeline,
+            save_final_video_timeline_cmd,
+            export_video_with_overlays_cmd,
+            cancel_video_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

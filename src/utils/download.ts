@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 
 const PNG_FILTERS = [{ name: "PNG image", extensions: ["png"] as string[] }];
+const MP4_FILTERS = [{ name: "MP4 video", extensions: ["mp4"] as string[] }];
 
 /** Trigger a browser download from a data URL (e.g. PNG from Tauri read). */
 export function downloadDataUrl(dataUrl: string, filename: string) {
@@ -101,4 +102,27 @@ export async function savePngListToChosenFolder(
 export function sanitizeDownloadFilename(name: string): string {
   const base = name.replace(/[/\\?%*:|"<>]/g, "-").trim() || "image";
   return base.length > 120 ? base.slice(0, 120) : base;
+}
+
+/**
+ * Open system Save dialog for an MP4 and return the chosen path, or null if cancelled.
+ */
+export async function pickVideoSavePath(defaultName: string): Promise<string | null> {
+  const safeName = sanitizeDownloadFilename(defaultName);
+  if (!isTauri()) {
+    return safeName.endsWith(".mp4") ? safeName : `${safeName}.mp4`;
+  }
+  let defaultPath: string;
+  try {
+    const base = safeName.endsWith(".mp4") ? safeName : `${safeName}.mp4`;
+    defaultPath = await join(await downloadDir(), base);
+  } catch {
+    defaultPath = safeName.endsWith(".mp4") ? safeName : `${safeName}.mp4`;
+  }
+  const path = await save({
+    title: "Export video",
+    filters: MP4_FILTERS,
+    defaultPath,
+  });
+  return path ?? null;
 }

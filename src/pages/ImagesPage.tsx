@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useProject } from "../context/ProjectContext";
 import { EpisodeAccordion, type EpisodePanelSpec } from "../components/EpisodeAccordion";
 import {
@@ -8,6 +8,7 @@ import {
   getOverlayImagesManifest,
   getTranscriptAnalysis,
   isXaiApiKeySet,
+  prepareFinalVideoTimelineWithSelection,
 } from "../services/pipelineService";
 import type {
   GeneratedOverlayImage,
@@ -17,9 +18,17 @@ import type {
 } from "../types/pipeline";
 import { downloadFromUrl, sanitizeDownloadFilename } from "../utils/download";
 
+function isVideoReadyForFinalVideo(
+  manifest: OverlayImagesManifest | null | undefined,
+  analysisOk: boolean,
+): boolean {
+  return analysisOk && !!manifest && manifest.images.length > 0;
+}
+
 export function ImagesPage() {
   const { project, refreshProject } = useProject();
   const location = useLocation();
+  const navigate = useNavigate();
   const [xaiKeySet, setXaiKeySet] = useState<boolean | null>(null);
   const [manifestByVideo, setManifestByVideo] = useState<
     Record<string, OverlayImagesManifest | null>
@@ -28,6 +37,11 @@ export function ImagesPage() {
   const [generatingVideoId, setGeneratingVideoId] = useState<string | null>(null);
   const [progress, setProgress] = useState<ImageGenerationProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedImagesByVideo, setSelectedImagesByVideo] = useState<
+    Record<string, Set<string>>
+  >({});
+  const [creatingVideos, setCreatingVideos] = useState(false);
+  const [createProgress, setCreateProgress] = useState<string | null>(null);
 
   const transcribedVideos = useMemo(
     () => project?.videos.filter((v) => v.status === "transcribed") ?? [],
@@ -70,6 +84,91 @@ export function ImagesPage() {
     void refreshManifestsAndAnalysis();
   }, [refreshManifestsAndAnalysis]);
 
+  const readyVideoIds = useMemo(
+    () =>
+      transcribedVideos
+        .filter((v) =>
+          isVideoReadyForFinalVideo(manifestByVideo[v.id], analysisOkByVideo[v.id] ?? false),
+        )
+        .map((v) => v.id),
+    [transcribedVideos, manifestByVideo, analysisOkByVideo],
+  );
+
+  useEffect(() => {
+    setSelectedImagesByVideo((prev) => {
+      const next = { ...prev };
+      for (const videoId of readyVideoIds) {
+        const manifest = manifestByVideo[videoId];
+        if (!manifest?.images.length) continue;
+        const existing = next[videoId];
+        if (!existing || existing.size === 0) {
+          next[videoId] = new Set(manifest.images.map((img) => img.suggestionId));
+        }
+      }
+      return next;
+    });
+  }, [readyVideoIds, manifestByVideo]);
+
+  const toggleImageSelected = useCallback((videoId: string, suggestionId: string) => {
+    setSelectedImagesByVideo((prev) => {
+      const cur = new Set(prev[videoId] ?? []);
+      if (cur.has(suggestionId)) cur.delete(suggestionId);
+      else cur.add(suggestionId);
+      return { ...prev, [videoId]: cur };
+    });
+  }, []);
+
+  const toggleSelectAllForVideo = useCallback(
+    (videoId: string, imageIds: string[]) => {
+      setSelectedImagesByVideo((prev) => {
+        const cur = prev[videoId] ?? new Set<string>();
+        const allSelected =
+          imageIds.length > 0 && imageIds.every((id) => cur.has(id));
+        return {
+          ...prev,
+          [videoId]: allSelected ? new Set() : new Set(imageIds),
+        };
+      });
+    },
+    [],
+  );
+
+  const handleCreateVideos = useCallback(async () => {
+    if (!project) return;
+    const jobs = Object.entries(selectedImagesByVideo).filter(
+      ([, ids]) => ids.size > 0,
+    );
+    if (jobs.length === 0) {
+      setError("Select at least one image to include in the final video.");
+      return;
+    }
+    setError(null);
+    setCreatingVideos(true);
+    setCreateProgress(null);
+    try {
+      const createdIds: string[] = [];
+      for (let i = 0; i < jobs.length; i++) {
+        const [videoId, ids] = jobs[i];
+        const video = transcribedVideos.find((v) => v.id === videoId);
+        setCreateProgress(
+          `Preparing final video ${i + 1} of ${jobs.length}${video ? `: ${video.fileName}` : ""} (${ids.size} image${ids.size === 1 ? "" : "s"})…`,
+        );
+        await prepareFinalVideoTimelineWithSelection(
+          project.rootPath,
+          videoId,
+          [...ids],
+        );
+        createdIds.push(videoId);
+      }
+      navigate("/final-video", { state: { createdVideoIds: createdIds } });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setCreatingVideos(false);
+      setCreateProgress(null);
+    }
+  }, [navigate, project, selectedImagesByVideo, transcribedVideos]);
+
   const handleGenerate = useCallback(
     async (videoId: string) => {
       if (!project) return;
@@ -105,23 +204,51 @@ export function ImagesPage() {
 
   const panels: EpisodePanelSpec[] = useMemo(
     () =>
-      transcribedVideos.map((v) => ({
-        id: v.id,
-        title: v.fileName,
-        subtitle: v.status,
-        renderContent: () => (
-          <ImagesEpisodeBody
-            video={v}
-            rootPath={rootPath}
-            manifest={manifestByVideo[v.id] ?? null}
-            analysisOk={analysisOkByVideo[v.id] ?? false}
-            generating={
-              generatingVideoId === v.id ? { progress } : null
-            }
-            onGenerate={() => handleGenerate(v.id)}
-          />
-        ),
-      })),
+      transcribedVideos.map((v) => {
+        const manifest = manifestByVideo[v.id];
+        const ready = isVideoReadyForFinalVideo(
+          manifest,
+          analysisOkByVideo[v.id] ?? false,
+        );
+        const imageIds = manifest?.images.map((img) => img.suggestionId) ?? [];
+        const selectedSet = selectedImagesByVideo[v.id] ?? new Set<string>();
+        const allSelected =
+          imageIds.length > 0 && imageIds.every((id) => selectedSet.has(id));
+        return {
+          id: v.id,
+          title: v.fileName,
+          subtitle: v.status,
+          headerActions:
+            ready && imageIds.length > 0 ? (
+              <button
+                type="button"
+                className="btn small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleSelectAllForVideo(v.id, imageIds);
+                }}
+              >
+                {allSelected ? "Deselect all" : "Select all"}
+              </button>
+            ) : null,
+          renderContent: () => (
+            <ImagesEpisodeBody
+              video={v}
+              rootPath={rootPath}
+              manifest={manifest ?? null}
+              analysisOk={analysisOkByVideo[v.id] ?? false}
+              selectedImageIds={selectedSet}
+              onToggleImage={(suggestionId) =>
+                toggleImageSelected(v.id, suggestionId)
+              }
+              generating={
+                generatingVideoId === v.id ? { progress } : null
+              }
+              onGenerate={() => handleGenerate(v.id)}
+            />
+          ),
+        };
+      }),
     [
       transcribedVideos,
       rootPath,
@@ -130,8 +257,19 @@ export function ImagesPage() {
       generatingVideoId,
       progress,
       handleGenerate,
+      selectedImagesByVideo,
+      toggleImageSelected,
+      toggleSelectAllForVideo,
     ],
   );
+
+  const totalSelectedImages = useMemo(() => {
+    let n = 0;
+    for (const ids of Object.values(selectedImagesByVideo)) {
+      n += ids.size;
+    }
+    return n;
+  }, [selectedImagesByVideo]);
 
   if (!project) {
     return (
@@ -143,13 +281,27 @@ export function ImagesPage() {
 
   return (
     <section className="page">
-      <header className="page-header">
-        <h1>Images</h1>
-        <p>
-          Generate overlay art with xAI Grok Imagine per episode. Expand an episode to run
-          generation and review prompts with previews. Use <strong>Gallery</strong> to download
-          batches.
-        </p>
+      <header className="page-header page-header-with-actions">
+        <div className="page-header-text">
+          <h1>Images</h1>
+          <p>
+            Generate overlay art with xAI Grok Imagine per episode. Select individual images
+            (or <strong>Select all</strong> per episode), then use <strong>Create video</strong>{" "}
+            to build the final timeline. Preview and export on <strong>Final Video</strong>.
+          </p>
+        </div>
+        <div className="page-header-actions">
+          <button
+            type="button"
+            className="btn primary"
+            disabled={
+              creatingVideos || totalSelectedImages === 0 || transcribedVideos.length === 0
+            }
+            onClick={() => void handleCreateVideos()}
+          >
+            {creatingVideos ? "Creating video…" : "Create video"}
+          </button>
+        </div>
       </header>
 
       {transcribedVideos.length === 0 ? (
@@ -167,6 +319,15 @@ export function ImagesPage() {
 
           {error && <p className="error">{error}</p>}
 
+          {createProgress ? <p className="muted">{createProgress}</p> : null}
+
+          {totalSelectedImages > 0 ? (
+            <p className="muted" style={{ marginBottom: "0.75rem" }}>
+              {totalSelectedImages} image{totalSelectedImages === 1 ? "" : "s"} selected for
+              final video.
+            </p>
+          ) : null}
+
           <EpisodeAccordion panels={panels} />
         </>
       )}
@@ -179,6 +340,8 @@ function ImagesEpisodeBody({
   rootPath,
   manifest,
   analysisOk,
+  selectedImageIds,
+  onToggleImage,
   generating,
   onGenerate,
 }: {
@@ -186,6 +349,8 @@ function ImagesEpisodeBody({
   rootPath: string;
   manifest: OverlayImagesManifest | null;
   analysisOk: boolean;
+  selectedImageIds: Set<string>;
+  onToggleImage: (suggestionId: string) => void;
   generating: { progress: ImageGenerationProgress | null } | null;
   onGenerate: () => void;
 }) {
@@ -292,6 +457,8 @@ function ImagesEpisodeBody({
               img={img}
               displayUrl={displayUrls[img.suggestionId]}
               previewError={previewErrors[img.suggestionId]}
+              selected={selectedImageIds.has(img.suggestionId)}
+              onToggleSelect={() => onToggleImage(img.suggestionId)}
             />
           ))}
         </div>
@@ -315,17 +482,27 @@ function ImageResultCard({
   displayUrl,
   previewError,
   videoId,
+  selected,
+  onToggleSelect,
 }: {
   img: GeneratedOverlayImage;
   displayUrl?: string;
   previewError?: string;
   videoId: string;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const file = `${sanitizeDownloadFilename(img.title)}-${img.suggestionId.slice(0, 8)}.png`;
 
   return (
-    <div className="card image-result-card">
-      <h3>{img.title}</h3>
+    <div className={`card image-result-card${selected ? " image-result-card-selected" : ""}`}>
+      <div className="image-result-card-header">
+        <h3>{img.title}</h3>
+        <label className="episode-select-checkbox image-result-select">
+          <input type="checkbox" checked={selected} onChange={onToggleSelect} />
+          Include in video
+        </label>
+      </div>
       <div className="image-result-grid">
         <div className="image-result-preview">
           {displayUrl ? (
@@ -365,3 +542,4 @@ function ImageResultCard({
     </div>
   );
 }
+

@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  FinalVideoTimeline,
   ImageGenerationProgress,
   OverlayImagesManifest,
   PipelineProgress,
@@ -9,10 +10,17 @@ import type {
   Transcript,
   TranscriptAnalysis,
   TranscriptionPreflight,
+  VideoExportPreflight,
+  VideoExportProgress,
+  VideoOverlayClip,
 } from "../types/pipeline";
 
 export async function getTranscriptionPreflight(): Promise<TranscriptionPreflight> {
   return invoke<TranscriptionPreflight>("get_transcription_preflight");
+}
+
+export async function getVideoExportPreflight(): Promise<VideoExportPreflight> {
+  return invoke<VideoExportPreflight>("get_video_export_preflight");
 }
 
 export async function openProject(rootPath: string): Promise<ProjectManifest> {
@@ -182,6 +190,88 @@ export async function generateOverlayImages(
     return invoke<OverlayImagesManifest>("generate_overlay_images", {
       rootPath,
       videoId,
+    });
+  } finally {
+    if (unlisten) {
+      await unlisten();
+    }
+  }
+}
+
+export async function getFinalVideoTimeline(
+  rootPath: string,
+  videoId: string,
+): Promise<FinalVideoTimeline> {
+  return invoke<FinalVideoTimeline>("get_final_video_timeline", {
+    rootPath,
+    videoId,
+  });
+}
+
+export async function saveFinalVideoTimeline(
+  rootPath: string,
+  timeline: FinalVideoTimeline,
+): Promise<void> {
+  await invoke("save_final_video_timeline_cmd", { rootPath, timeline });
+}
+
+/** Rebuild timeline from current analysis + image manifest and persist it. */
+export async function prepareFinalVideoTimeline(
+  rootPath: string,
+  videoId: string,
+): Promise<FinalVideoTimeline> {
+  return invoke<FinalVideoTimeline>("rebuild_final_video_timeline", {
+    rootPath,
+    videoId,
+  });
+}
+
+export async function rebuildFinalVideoTimeline(
+  rootPath: string,
+  videoId: string,
+): Promise<FinalVideoTimeline> {
+  return prepareFinalVideoTimeline(rootPath, videoId);
+}
+
+/** Rebuild timeline, keep only selected overlay images, and persist. */
+export async function prepareFinalVideoTimelineWithSelection(
+  rootPath: string,
+  videoId: string,
+  suggestionIds: string[],
+): Promise<FinalVideoTimeline> {
+  const timeline = await rebuildFinalVideoTimeline(rootPath, videoId);
+  const allowed = new Set(suggestionIds);
+  const filtered: FinalVideoTimeline = {
+    ...timeline,
+    clips: timeline.clips.filter((c) => allowed.has(c.suggestionId)),
+  };
+  await saveFinalVideoTimeline(rootPath, filtered);
+  return filtered;
+}
+
+export async function cancelVideoExport(videoId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_video_export", { videoId });
+}
+
+export async function exportFinalVideo(
+  rootPath: string,
+  videoId: string,
+  outputPath: string,
+  clips: VideoOverlayClip[],
+  onProgress?: (progress: VideoExportProgress) => void,
+): Promise<string> {
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<VideoExportProgress>("video_export_progress", (event) => {
+      onProgress(event.payload);
+    });
+  }
+  try {
+    return invoke<string>("export_video_with_overlays_cmd", {
+      rootPath,
+      videoId,
+      outputPath,
+      clips,
     });
   } finally {
     if (unlisten) {
