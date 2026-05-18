@@ -17,8 +17,7 @@ export const Sidebar = () => {
     let cancelled = false;
     void (async () => {
       let count = 0;
-      const videos = project.videos.filter((v) => v.status === "transcribed");
-      for (const video of videos) {
+      for (const video of project.videos) {
         const m = await getOverlayImagesManifest(project.rootPath, video.id);
         count += m?.images.length ?? 0;
       }

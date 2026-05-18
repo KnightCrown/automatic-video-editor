@@ -21,6 +21,21 @@ export function projectDisplayName(rootPath: string): string {
   return parts[parts.length - 1] ?? rootPath;
 }
 
+/** Statuses that imply a transcript file exists on disk (post-transcription pipeline). */
+const TRANSCRIPT_READY_STATUSES = new Set([
+  "transcribed",
+  "analyzed",
+  "images_generated",
+  "done",
+  "analyzing",
+  "generating_images",
+]);
+
+export function videoHasTranscriptArtifact(status: string | undefined): boolean {
+  if (!status) return false;
+  return TRANSCRIPT_READY_STATUSES.has(status);
+}
+
 export function displayPipelineStatus(status: string): string {
   if (status === "pending") return "Ready";
   if (status === "failed") return "Failed";

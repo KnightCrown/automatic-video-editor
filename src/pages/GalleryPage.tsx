@@ -273,7 +273,11 @@ function GalleryGrid({
             onClick={() => onSelect(key)}
             className={`text-left bg-surface border rounded-xl overflow-hidden transition-colors ${
               isSelected ? "border-primary" : "border-border hover:border-gray-600"
-            } ${viewMode === "grid" ? "w-full min-w-0 self-start flex flex-col" : "flex gap-4 p-3 w-full"}`}
+            } ${
+              viewMode === "grid"
+                ? "w-full min-w-0 self-start flex flex-col"
+                : "flex flex-shrink-0 gap-4 p-3 w-full min-h-[5.5rem]"
+            }`}
           >
             <div
               className={`bg-background relative flex items-center justify-center overflow-hidden ${

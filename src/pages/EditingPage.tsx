@@ -30,8 +30,10 @@ import type {
   TranscriptAnalysis,
 } from "../types/pipeline";
 import {
+  displayPipelineStatus,
   formatIdealDisplayMs,
   formatTimeRangeMs,
+  videoHasTranscriptArtifact,
 } from "../utils/format";
 
 type TabId = "overlays" | "images" | "transcript";
@@ -240,7 +242,8 @@ export function EditingPage() {
     );
   }
 
-  const canAnalyze = activeVideo?.status === "transcribed";
+  const hasTranscript =
+    Boolean(transcript) || videoHasTranscriptArtifact(activeVideo?.status);
   const hasAnalysis = !!(analysis && analysis.suggestions.length > 0);
 
   return (
@@ -322,7 +325,7 @@ export function EditingPage() {
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-background p-5">
                 {activeTab === "overlays" && (
                   <OverlaysTabContent
-                    canAnalyze={canAnalyze}
+                    hasTranscript={hasTranscript}
                     analyzing={analyzing}
                     hasAnalysis={hasAnalysis}
                     analysis={analysis}
@@ -334,6 +337,7 @@ export function EditingPage() {
                 )}
                 {activeTab === "images" && (
                   <ImagesTabContent
+                    hasTranscript={hasTranscript}
                     hasAnalysis={hasAnalysis}
                     generating={generating}
                     imageProgress={imageProgress}
@@ -345,7 +349,7 @@ export function EditingPage() {
                   />
                 )}
                 {activeTab === "transcript" && (
-                  <TranscriptTabContent transcript={transcript} canAnalyze={canAnalyze} />
+                  <TranscriptTabContent transcript={transcript} hasTranscript={hasTranscript} />
                 )}
               </div>
             </>
@@ -383,6 +387,15 @@ function VideoHeader({ video }: { video: { fileName: string; status: string } })
     <div>
       <h2 className="text-lg font-semibold text-white">{video.fileName}</h2>
       <p className="text-sm text-textMuted mt-1 capitalize">{video.status.replace(/_/g, " ")}</p>
+    </div>
+  );
+}
+
+function TabEmptyState({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center min-h-[10rem] text-center px-6 py-8">
+      <p className="text-sm text-textMuted max-w-md">{title}</p>
+      {hint ? <p className="text-xs text-textMuted mt-2 max-w-sm opacity-80">{hint}</p> : null}
     </div>
   );
 }
@@ -430,7 +443,7 @@ function EpisodeListPanel({
   onAddEpisodes: () => void;
 }) {
   return (
-    <div className="w-80 flex flex-col bg-surface border border-border rounded-xl overflow-hidden flex-shrink-0">
+    <div className="w-64 flex flex-col bg-surface border border-border rounded-xl overflow-hidden flex-shrink-0">
       <div className="p-4 border-b border-border flex justify-between items-center bg-[#151821]">
         <h3 className="text-sm font-semibold text-white">Episodes ({videos.length})</h3>
         <button
@@ -461,7 +474,7 @@ function EpisodeListPanel({
               {video.fileName}
             </p>
             <span className="text-[10px] text-textMuted uppercase ml-2 flex-shrink-0">
-              {video.status === "transcribed" ? "Ready" : video.status}
+              {displayPipelineStatus(video.status)}
             </span>
           </button>
         ))}
@@ -471,7 +484,7 @@ function EpisodeListPanel({
 }
 
 function OverlaysTabContent({
-  canAnalyze,
+  hasTranscript,
   analyzing,
   hasAnalysis,
   analysis,
@@ -480,7 +493,7 @@ function OverlaysTabContent({
   onAnalyze,
   onSelectSuggestion,
 }: {
-  canAnalyze: boolean;
+  hasTranscript: boolean;
   analyzing: boolean;
   hasAnalysis: boolean;
   analysis: TranscriptAnalysis | null;
@@ -489,11 +502,12 @@ function OverlaysTabContent({
   onAnalyze: () => void;
   onSelectSuggestion: (id: string) => void;
 }) {
-  if (!canAnalyze) {
+  if (!hasTranscript) {
     return (
-      <p className="text-textMuted text-sm">
-        Transcribe this episode first (Overview → Start all ready or per-video transcribe).
-      </p>
+      <TabEmptyState
+        title="Transcribe this episode to get started."
+        hint="Go to Overview and run transcription for this video. Overlay suggestions appear after analysis."
+      />
     );
   }
 
@@ -503,13 +517,13 @@ function OverlaysTabContent({
         type="button"
         disabled={analyzing}
         onClick={onAnalyze}
-        className="self-start bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+        className="self-start flex-shrink-0 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
       >
         {analyzing ? "Analyzing transcript…" : "Analyze transcript with OpenAI"}
       </button>
 
       {analyzing && (
-        <p className="text-textMuted text-sm">Sending transcript to OpenAI…</p>
+        <p className="text-textMuted text-sm flex-shrink-0">Sending transcript to OpenAI…</p>
       )}
 
       {hasAnalysis && analysis && (
@@ -541,9 +555,10 @@ function OverlaysTabContent({
       )}
 
       {!hasAnalysis && !analyzing && (
-        <p className="text-textMuted text-sm">
-          No analysis yet. Click Analyze transcript with OpenAI.
-        </p>
+        <TabEmptyState
+          title="No overlay suggestions yet."
+          hint='Click "Analyze transcript with OpenAI" above to generate overlay suggestions from the transcript.'
+        />
       )}
     </div>
   );
@@ -590,6 +605,7 @@ function SuggestionRow({
 }
 
 function ImagesTabContent({
+  hasTranscript,
   hasAnalysis,
   generating,
   imageProgress,
@@ -599,6 +615,7 @@ function ImagesTabContent({
   onGenerate,
   onToggleImage,
 }: {
+  hasTranscript: boolean;
   hasAnalysis: boolean;
   generating: boolean;
   imageProgress: ImageGenerationProgress | null;
@@ -608,24 +625,36 @@ function ImagesTabContent({
   onGenerate: () => void;
   onToggleImage: (id: string) => void;
 }) {
+  if (!hasTranscript) {
+    return (
+      <TabEmptyState
+        title="Transcribe this episode to get started."
+        hint="Image generation is available after transcription and overlay analysis on the Overlays tab."
+      />
+    );
+  }
+
   if (!hasAnalysis) {
     return (
-      <p className="text-textMuted text-sm">
-        Run overlay analysis first (Overlays tab).
-      </p>
+      <TabEmptyState
+        title="Analyze the transcript before generating images."
+        hint='Open the Overlays tab and click "Analyze transcript with OpenAI" to create overlay suggestions.'
+      />
     );
   }
 
   return (
-    <ImagesTabBody
-      generating={generating}
-      imageProgress={imageProgress}
-      manifest={manifest}
-      displayUrls={displayUrls}
-      selectedImageIds={selectedImageIds}
-      onGenerate={onGenerate}
-      onToggleImage={onToggleImage}
-    />
+    <div className="flex flex-1 flex-col min-h-0">
+      <ImagesTabBody
+        generating={generating}
+        imageProgress={imageProgress}
+        manifest={manifest}
+        displayUrls={displayUrls}
+        selectedImageIds={selectedImageIds}
+        onGenerate={onGenerate}
+        onToggleImage={onToggleImage}
+      />
+    </div>
   );
 }
 
@@ -649,18 +678,18 @@ function ImagesTabBody(props: {
   } = props;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
       <button
         type="button"
         disabled={generating}
         onClick={onGenerate}
-        className="self-start bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+        className="self-start flex-shrink-0 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
       >
         {generating ? "Generating images…" : "Generate images (Grok Imagine)"}
       </button>
 
       {generating && imageProgress && (
-        <div className="text-sm text-textMuted">
+        <div className="text-sm text-textMuted flex-shrink-0">
           <strong className="text-white">{imageProgress.stage}</strong>
           {imageProgress.message ? ` — ${imageProgress.message}` : ""} ({imageProgress.index}/
           {imageProgress.total})
@@ -668,7 +697,8 @@ function ImagesTabBody(props: {
       )}
 
       {manifest && manifest.images.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-2">
           {manifest.images.map((img) => (
             <ImageSelectCard
               key={img.suggestionId}
@@ -678,9 +708,13 @@ function ImagesTabBody(props: {
               onToggle={() => onToggleImage(img.suggestionId)}
             />
           ))}
+          </div>
         </div>
       ) : !generating ? (
-        <p className="text-textMuted text-sm">No images yet. Generate to render overlay prompts.</p>
+        <TabEmptyState
+          title="No images generated yet."
+          hint='Click "Generate images (Grok Imagine)" above to render images from your overlay suggestions.'
+        />
       ) : null}
     </div>
   );
@@ -723,20 +757,30 @@ function ImageSelectCard({
 
 function TranscriptTabContent({
   transcript,
-  canAnalyze,
+  hasTranscript,
 }: {
   transcript: Transcript | null;
-  canAnalyze: boolean;
+  hasTranscript: boolean;
 }) {
-  if (!canAnalyze) {
-    return <p className="text-textMuted text-sm">Transcribe this episode first.</p>;
+  if (!hasTranscript) {
+    return (
+      <TabEmptyState
+        title="Transcribe this episode to get started."
+        hint="The full transcript will appear here after you run transcription from Overview."
+      />
+    );
   }
   if (!transcript) {
-    return <p className="text-textMuted text-sm">No transcript file found for this episode.</p>;
+    return (
+      <TabEmptyState
+        title="Transcript not found for this episode."
+        hint="Try refreshing the project from Overview, or re-run transcription if the file was removed."
+      />
+    );
   }
   return (
-    <div className="space-y-4">
-      <p className="text-xs text-textMuted">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
+      <p className="text-xs text-textMuted flex-shrink-0">
         {transcript.segments.length} segments
         {transcript.appliedTranscriptTimingOffsetMs != null &&
           ` · timing offset ${transcript.appliedTranscriptTimingOffsetMs}ms`}
@@ -748,7 +792,7 @@ function TranscriptTabContent({
 
 function TranscriptSegmentList({ transcript }: { transcript: Transcript }) {
   return (
-    <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+    <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
       {transcript.segments.map((seg, i) => (
         <div key={i} className="p-3 rounded-lg bg-surface border border-border text-sm">
           <span className="text-primary text-xs font-mono mr-2">
