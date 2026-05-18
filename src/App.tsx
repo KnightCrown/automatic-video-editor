@@ -14,9 +14,9 @@ function App() {
     <ProjectProvider>
       <VideoExportProvider>
         <BrowserRouter>
-          <div className="flex h-screen bg-[#0F111A] text-textMain overflow-hidden font-sans">
+          <div className="flex h-screen min-h-0 min-w-0 bg-[#0F111A] text-textMain overflow-hidden font-sans">
             <Sidebar />
-            <main className="flex-1 flex flex-col h-screen overflow-hidden bg-background">
+            <main className="flex-1 flex flex-col min-h-0 min-w-0 h-screen overflow-hidden bg-background">
               <Routes>
                 <Route path="/" element={<OverviewPage />} />
                 <Route path="/editing" element={<EditingPage />} />

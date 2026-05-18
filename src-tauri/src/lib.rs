@@ -37,6 +37,56 @@ use crate::types::{
     TranscriptAnalysis, TranscriptionPreflight, VideoExportPreflight,
 };
 use crate::video::encoders::refresh_video_export_preflight_cache;
+use tauri::Manager;
+
+/// Preferred minimum window size (logical px); clamped to the current monitor in setup.
+const PREFERRED_MIN_WIDTH: f64 = 1024.0;
+const PREFERRED_MIN_HEIGHT: f64 = 600.0;
+const ABSOLUTE_MIN_WIDTH: f64 = 800.0;
+const ABSOLUTE_MIN_HEIGHT: f64 = 500.0;
+const WINDOW_CHROME_MARGIN: f64 = 48.0;
+
+fn work_area_logical(monitor: &tauri::Monitor) -> (f64, f64) {
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let w = area.size.width as f64 / scale;
+    let h = area.size.height as f64 / scale;
+    (w, h)
+}
+
+fn apply_window_size_limits(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+
+    let (work_w, work_h) = monitor
+        .as_ref()
+        .map(work_area_logical)
+        .unwrap_or((PREFERRED_MIN_WIDTH + WINDOW_CHROME_MARGIN, PREFERRED_MIN_HEIGHT + WINDOW_CHROME_MARGIN));
+
+    let max_w = (work_w - WINDOW_CHROME_MARGIN).max(ABSOLUTE_MIN_WIDTH);
+    let max_h = (work_h - WINDOW_CHROME_MARGIN).max(ABSOLUTE_MIN_HEIGHT);
+
+    let min_w = PREFERRED_MIN_WIDTH.min(max_w).max(ABSOLUTE_MIN_WIDTH.min(max_w));
+    let min_h = PREFERRED_MIN_HEIGHT
+        .min(max_h)
+        .max(ABSOLUTE_MIN_HEIGHT.min(max_h));
+
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_w, min_h)));
+
+    if let Ok(size) = window.inner_size() {
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let logical = size.to_logical::<f64>(scale);
+        if logical.width > max_w || logical.height > max_h {
+            let _ = window.set_size(tauri::LogicalSize::new(
+                logical.width.min(max_w),
+                logical.height.min(max_h),
+            ));
+        }
+    }
+}
 
 #[tauri::command]
 fn get_parakeet_model_info() -> Vec<ParakeetModelFile> {
@@ -361,6 +411,12 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .manage(VideoExportController::new())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                apply_window_size_limits(&window);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_parakeet_model_info,
             check_parakeet_model_ready,

@@ -8,6 +8,8 @@ import {
   Wand2,
   Zap,
   Film,
+  Check,
+  X,
 } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
 import {
@@ -17,6 +19,7 @@ import {
   getOverlayImagesManifest,
   getTranscript,
   getTranscriptAnalysis,
+  getFinalVideoTimeline,
   isApiKeySet,
   isXaiApiKeySet,
   openProject,
@@ -31,6 +34,7 @@ import type {
 } from "../types/pipeline";
 import {
   displayPipelineStatus,
+  excerptSnippet,
   formatIdealDisplayMs,
   formatTimeRangeMs,
   videoHasTranscriptArtifact,
@@ -51,6 +55,7 @@ export function EditingPage() {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(new Set());
+  const [checkedSuggestionIds, setCheckedSuggestionIds] = useState<Set<string>>(new Set());
   const [displayUrls, setDisplayUrls] = useState<Record<string, string>>({});
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -78,24 +83,29 @@ export function EditingPage() {
 
   const reloadEpisodeData = useCallback(async () => {
     if (!project || !activeVideo) return;
-    const [a, m, t] = await Promise.all([
+    const [a, m, t, timeline] = await Promise.all([
       getTranscriptAnalysis(project.rootPath, activeVideo.id).catch(() => null),
       getOverlayImagesManifest(project.rootPath, activeVideo.id).catch(() => null),
       getTranscript(project.rootPath, activeVideo.id).catch(() => null),
+      getFinalVideoTimeline(project.rootPath, activeVideo.id).catch(() => null),
     ]);
     setAnalysis(a);
     setManifest(m);
     setTranscript(t);
-    if (a?.suggestions.length && !selectedSuggestionId) {
-      setSelectedSuggestionId(a.suggestions[0].id);
+    setCheckedSuggestionIds(new Set());
+    if (a?.suggestions.length) {
+      setSelectedSuggestionId((prev) =>
+        prev && a.suggestions.some((s) => s.id === prev) ? prev : a.suggestions[0].id,
+      );
+    } else {
+      setSelectedSuggestionId(null);
     }
-    if (m?.images.length) {
-      setSelectedImageIds((prev) => {
-        if (prev.size > 0) return prev;
-        return new Set(m.images.map((img) => img.suggestionId));
-      });
+    if (timeline?.clips.length) {
+      setSelectedImageIds(new Set(timeline.clips.map((c) => c.suggestionId)));
+    } else {
+      setSelectedImageIds(new Set());
     }
-  }, [project, activeVideo, selectedSuggestionId]);
+  }, [project, activeVideo]);
 
   useEffect(() => {
     void reloadEpisodeData();
@@ -199,6 +209,7 @@ export function EditingPage() {
       );
       setManifest(m);
       setSelectedImageIds(new Set(m.images.map((img) => img.suggestionId)));
+      setCheckedSuggestionIds(new Set());
       await refreshProject();
     } catch (err) {
       setError(String(err));
@@ -229,6 +240,34 @@ export function EditingPage() {
       const next = new Set(prev);
       if (next.has(suggestionId)) next.delete(suggestionId);
       else next.add(suggestionId);
+      return next;
+    });
+  }
+
+  function toggleCheckedSuggestion(suggestionId: string) {
+    setCheckedSuggestionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(suggestionId)) next.delete(suggestionId);
+      else next.add(suggestionId);
+      return next;
+    });
+  }
+
+  function approveCheckedSuggestions() {
+    const withImages = generatedSuggestionIds;
+    setSelectedImageIds((prev) => {
+      const next = new Set(prev);
+      for (const id of checkedSuggestionIds) {
+        if (withImages.has(id)) next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function declineCheckedSuggestions() {
+    setSelectedImageIds((prev) => {
+      const next = new Set(prev);
+      for (const id of checkedSuggestionIds) next.delete(id);
       return next;
     });
   }
@@ -288,7 +327,7 @@ export function EditingPage() {
         <p className="text-sm text-danger mb-4">xAI API key missing — set it in Settings.</p>
       )}
 
-      <div className="flex-1 flex gap-6 overflow-hidden min-h-0">
+      <div className="flex-1 flex gap-6 overflow-x-auto overflow-y-hidden min-h-0 min-w-0">
         <EpisodeListPanel
           videos={project.videos}
           activeVideoId={activeVideo?.id ?? null}
@@ -296,7 +335,7 @@ export function EditingPage() {
           onAddEpisodes={() => void handleAddEpisodes()}
         />
 
-        <div className="flex-[2] flex flex-col bg-surface border border-border rounded-xl overflow-hidden min-w-0">
+        <div className="flex-1 min-w-0 flex flex-col bg-surface border border-border rounded-xl overflow-hidden">
           {activeVideo ? (
             <>
               <VideoHeaderWrap video={activeVideo} />
@@ -330,9 +369,15 @@ export function EditingPage() {
                     hasAnalysis={hasAnalysis}
                     analysis={analysis}
                     generatedSuggestionIds={generatedSuggestionIds}
+                    displayUrls={displayUrls}
                     selectedSuggestionId={selectedSuggestionId}
+                    selectedImageIds={selectedImageIds}
+                    checkedSuggestionIds={checkedSuggestionIds}
                     onAnalyze={() => void handleAnalyze()}
                     onSelectSuggestion={setSelectedSuggestionId}
+                    onToggleChecked={toggleCheckedSuggestion}
+                    onApproveChecked={approveCheckedSuggestions}
+                    onDeclineChecked={declineCheckedSuggestions}
                   />
                 )}
                 {activeTab === "images" && (
@@ -346,6 +391,7 @@ export function EditingPage() {
                     selectedImageIds={selectedImageIds}
                     onGenerate={() => void handleGenerateImages()}
                     onToggleImage={toggleImage}
+                    onSelectImage={setSelectedSuggestionId}
                   />
                 )}
                 {activeTab === "transcript" && (
@@ -483,24 +529,48 @@ function EpisodeListPanel({
   );
 }
 
+type OverlayRowStatus = "pending" | "generated" | "approved";
+
+function overlayRowStatus(
+  suggestionId: string,
+  hasImage: boolean,
+  approvedIds: Set<string>,
+): OverlayRowStatus {
+  if (!hasImage) return "pending";
+  if (approvedIds.has(suggestionId)) return "approved";
+  return "generated";
+}
+
 function OverlaysTabContent({
   hasTranscript,
   analyzing,
   hasAnalysis,
   analysis,
   generatedSuggestionIds,
+  displayUrls,
   selectedSuggestionId,
+  selectedImageIds,
+  checkedSuggestionIds,
   onAnalyze,
   onSelectSuggestion,
+  onToggleChecked,
+  onApproveChecked,
+  onDeclineChecked,
 }: {
   hasTranscript: boolean;
   analyzing: boolean;
   hasAnalysis: boolean;
   analysis: TranscriptAnalysis | null;
   generatedSuggestionIds: Set<string>;
+  displayUrls: Record<string, string>;
   selectedSuggestionId: string | null;
+  selectedImageIds: Set<string>;
+  checkedSuggestionIds: Set<string>;
   onAnalyze: () => void;
   onSelectSuggestion: (id: string) => void;
+  onToggleChecked: (id: string) => void;
+  onApproveChecked: () => void;
+  onDeclineChecked: () => void;
 }) {
   if (!hasTranscript) {
     return (
@@ -527,31 +597,18 @@ function OverlaysTabContent({
       )}
 
       {hasAnalysis && analysis && (
-        <div className="rounded-xl border border-border bg-surface overflow-hidden flex-1 min-h-0 flex flex-col">
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-[#151821] text-textMuted border-b border-border sticky top-0 z-10">
-              <tr>
-                <th className="p-3 font-medium w-28">Time</th>
-                <th className="p-3 font-medium">Title</th>
-                <th className="p-3 font-medium">Excerpt</th>
-                <th className="p-3 font-medium w-24">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {analysis.suggestions.map((s) => (
-                <SuggestionRow
-                  key={s.id}
-                  suggestion={s}
-                  selected={selectedSuggestionId === s.id}
-                  hasImage={generatedSuggestionIds.has(s.id)}
-                  onSelect={() => onSelectSuggestion(s.id)}
-                />
-              ))}
-            </tbody>
-            </table>
-          </div>
-        </div>
+        <OverlaySuggestionsTable
+          analysis={analysis}
+          generatedSuggestionIds={generatedSuggestionIds}
+          displayUrls={displayUrls}
+          selectedSuggestionId={selectedSuggestionId}
+          selectedImageIds={selectedImageIds}
+          checkedSuggestionIds={checkedSuggestionIds}
+          onSelectSuggestion={onSelectSuggestion}
+          onToggleChecked={onToggleChecked}
+          onApproveChecked={onApproveChecked}
+          onDeclineChecked={onDeclineChecked}
+        />
       )}
 
       {!hasAnalysis && !analyzing && (
@@ -564,41 +621,230 @@ function OverlaysTabContent({
   );
 }
 
+function OverlaySuggestionsTable({
+  analysis,
+  generatedSuggestionIds,
+  displayUrls,
+  selectedSuggestionId,
+  selectedImageIds,
+  checkedSuggestionIds,
+  onSelectSuggestion,
+  onToggleChecked,
+  onApproveChecked,
+  onDeclineChecked,
+}: {
+  analysis: TranscriptAnalysis;
+  generatedSuggestionIds: Set<string>;
+  displayUrls: Record<string, string>;
+  selectedSuggestionId: string | null;
+  selectedImageIds: Set<string>;
+  checkedSuggestionIds: Set<string>;
+  onSelectSuggestion: (id: string) => void;
+  onToggleChecked: (id: string) => void;
+  onApproveChecked: () => void;
+  onDeclineChecked: () => void;
+}) {
+  const stats = useMemo(() => {
+    let approved = 0;
+    let generated = 0;
+    let pending = 0;
+    for (const s of analysis.suggestions) {
+      const hasImage = generatedSuggestionIds.has(s.id);
+      const status = overlayRowStatus(s.id, hasImage, selectedImageIds);
+      if (status === "approved") approved += 1;
+      else if (status === "generated") generated += 1;
+      else pending += 1;
+    }
+    return { approved, generated, pending };
+  }, [analysis.suggestions, generatedSuggestionIds, selectedImageIds]);
+
+  const checkedWithImages = useMemo(() => {
+    let n = 0;
+    for (const id of checkedSuggestionIds) {
+      if (generatedSuggestionIds.has(id)) n += 1;
+    }
+    return n;
+  }, [checkedSuggestionIds, generatedSuggestionIds]);
+
+  const checkedApproved = useMemo(() => {
+    let n = 0;
+    for (const id of checkedSuggestionIds) {
+      if (selectedImageIds.has(id)) n += 1;
+    }
+    return n;
+  }, [checkedSuggestionIds, selectedImageIds]);
+
+  return (
+    <div className="rounded-xl border border-border bg-surface overflow-hidden flex-1 min-h-0 flex flex-col">
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#151821] text-textMuted border-b border-border sticky top-0 z-10">
+            <tr>
+              <th className="p-3 w-10" aria-label="Select" />
+              <th className="p-3 font-medium w-32">Time</th>
+              <th className="p-3 font-medium min-w-[12rem]">Excerpt</th>
+              <th className="p-3 font-medium w-32">Image</th>
+              <th className="p-3 font-medium w-28">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {analysis.suggestions.map((s) => (
+              <SuggestionRow
+                key={s.id}
+                suggestion={s}
+                highlight={selectedSuggestionId === s.id}
+                hasImage={generatedSuggestionIds.has(s.id)}
+                displayUrl={displayUrls[s.id]}
+                status={overlayRowStatus(s.id, generatedSuggestionIds.has(s.id), selectedImageIds)}
+                checked={checkedSuggestionIds.has(s.id)}
+                onToggleChecked={() => onToggleChecked(s.id)}
+                onSelect={() => onSelectSuggestion(s.id)}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <OverlaySuggestionsFooter
+        total={analysis.suggestions.length}
+        stats={stats}
+        checkedWithImages={checkedWithImages}
+        checkedApproved={checkedApproved}
+        onApproveChecked={onApproveChecked}
+        onDeclineChecked={onDeclineChecked}
+      />
+    </div>
+  );
+}
+
+function OverlaySuggestionsFooter({
+  total,
+  stats,
+  checkedWithImages,
+  checkedApproved,
+  onApproveChecked,
+  onDeclineChecked,
+}: {
+  total: number;
+  stats: { approved: number; generated: number; pending: number };
+  checkedWithImages: number;
+  checkedApproved: number;
+  onApproveChecked: () => void;
+  onDeclineChecked: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-border bg-[#151821] flex-shrink-0">
+      <p className="text-xs text-textMuted">
+        {total} suggestions · {stats.approved} approved · {stats.generated} generated ·{" "}
+        {stats.pending} pending
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={checkedWithImages === 0}
+          onClick={onApproveChecked}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-success bg-opacity-20 text-success border border-success border-opacity-30 hover:bg-opacity-30 disabled:opacity-40"
+        >
+          <Check size={14} />
+          Approve selected ({checkedWithImages})
+        </button>
+        <button
+          type="button"
+          disabled={checkedApproved === 0}
+          onClick={onDeclineChecked}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-danger bg-opacity-10 text-danger border border-danger border-opacity-30 hover:bg-opacity-20 disabled:opacity-40"
+        >
+          <X size={14} />
+          Decline selected ({checkedApproved})
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function OverlayStatusBadge({ status }: { status: OverlayRowStatus }) {
+  const styles: Record<OverlayRowStatus, string> = {
+    pending: "bg-white bg-opacity-5 text-textMuted border-border",
+    generated: "bg-[#3B82F6] bg-opacity-10 text-[#3B82F6] border-[#3B82F6] border-opacity-30",
+    approved: "bg-success bg-opacity-20 text-success border-success border-opacity-30",
+  };
+  const labels: Record<OverlayRowStatus, string> = {
+    pending: "Pending",
+    generated: "Generated",
+    approved: "Approved",
+  };
+  return (
+    <span
+      className={`text-xs px-2 py-1 rounded border capitalize ${styles[status]}`}
+    >
+      {labels[status]}
+    </span>
+  );
+}
+
 function SuggestionRow({
   suggestion,
-  selected,
+  highlight,
   hasImage,
+  displayUrl,
+  status,
+  checked,
+  onToggleChecked,
   onSelect,
 }: {
   suggestion: OverlaySuggestion;
-  selected: boolean;
+  highlight: boolean;
   hasImage: boolean;
+  displayUrl?: string;
+  status: OverlayRowStatus;
+  checked: boolean;
+  onToggleChecked: () => void;
   onSelect: () => void;
 }) {
   return (
     <tr
       className={`cursor-pointer hover:bg-white hover:bg-opacity-5 ${
-        selected ? "bg-primary bg-opacity-10" : ""
+        highlight ? "bg-primary bg-opacity-10" : ""
       }`}
       onClick={onSelect}
     >
-      <td className="p-3 text-white whitespace-nowrap">
+      <td className="p-3 w-10" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggleChecked}
+          className="rounded border-border"
+          aria-label={`Select overlay at ${formatTimeRangeMs(suggestion.startMs, suggestion.endMs)}`}
+        />
+      </td>
+      <td className="p-3 text-white whitespace-nowrap align-top">
         {formatTimeRangeMs(suggestion.startMs, suggestion.endMs)}
         <br />
-        <span className="text-xs text-textMuted">{formatIdealDisplayMs(suggestion.idealDisplayMs)}</span>
-      </td>
-      <td className="p-3 text-white font-medium">{suggestion.title}</td>
-      <td className="p-3 text-textMuted max-w-md">{suggestion.transcriptExcerpt}</td>
-      <td className="p-3">
-        <span
-          className={`text-xs px-2 py-1 rounded ${
-            hasImage
-              ? "bg-success bg-opacity-20 text-success"
-              : "bg-white bg-opacity-5 text-textMuted"
-          }`}
-        >
-          {hasImage ? "Generated" : "Pending"}
+        <span className="text-xs text-textMuted">
+          {formatIdealDisplayMs(suggestion.idealDisplayMs)}
         </span>
+      </td>
+      <td className="p-3 text-textMuted align-top max-w-md">
+        <p className="text-sm leading-snug line-clamp-4" title={suggestion.transcriptExcerpt}>
+          {excerptSnippet(suggestion.transcriptExcerpt, 280)}
+        </p>
+      </td>
+      <td className="p-3 align-top" onClick={(e) => e.stopPropagation()}>
+        <div className="w-28 aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border">
+          {displayUrl ? (
+            <img
+              src={displayUrl}
+              alt=""
+              className="w-full h-full object-cover"
+            />
+          ) : hasImage ? (
+            <span className="text-[10px] text-textMuted">Loading…</span>
+          ) : (
+            <ImageIcon className="text-border" size={20} />
+          )}
+        </div>
+      </td>
+      <td className="p-3">
+        <OverlayStatusBadge status={status} />
       </td>
     </tr>
   );
@@ -614,6 +860,7 @@ function ImagesTabContent({
   selectedImageIds,
   onGenerate,
   onToggleImage,
+  onSelectImage,
 }: {
   hasTranscript: boolean;
   hasAnalysis: boolean;
@@ -624,6 +871,7 @@ function ImagesTabContent({
   selectedImageIds: Set<string>;
   onGenerate: () => void;
   onToggleImage: (id: string) => void;
+  onSelectImage: (id: string) => void;
 }) {
   if (!hasTranscript) {
     return (
@@ -653,6 +901,7 @@ function ImagesTabContent({
         selectedImageIds={selectedImageIds}
         onGenerate={onGenerate}
         onToggleImage={onToggleImage}
+        onSelectImage={onSelectImage}
       />
     </div>
   );
@@ -666,6 +915,7 @@ function ImagesTabBody(props: {
   selectedImageIds: Set<string>;
   onGenerate: () => void;
   onToggleImage: (id: string) => void;
+  onSelectImage: (id: string) => void;
 }) {
   const {
     generating,
@@ -675,6 +925,7 @@ function ImagesTabBody(props: {
     selectedImageIds,
     onGenerate,
     onToggleImage,
+    onSelectImage,
   } = props;
 
   return (
@@ -706,6 +957,7 @@ function ImagesTabBody(props: {
               displayUrl={displayUrls[img.suggestionId]}
               selected={selectedImageIds.has(img.suggestionId)}
               onToggle={() => onToggleImage(img.suggestionId)}
+              onSelect={() => onSelectImage(img.suggestionId)}
             />
           ))}
           </div>
@@ -725,32 +977,52 @@ function ImageSelectCard({
   displayUrl,
   selected,
   onToggle,
+  onSelect,
 }: {
-  img: { suggestionId: string; title: string; imagePrompt: string };
+  img: { suggestionId: string; title: string; transcriptExcerpt: string };
   displayUrl?: string;
   selected: boolean;
   onToggle: () => void;
+  onSelect: () => void;
 }) {
   return (
     <div
-      className={`rounded-xl border p-3 ${
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={`rounded-xl border p-3 text-left transition-colors cursor-pointer ${
         selected ? "border-primary bg-primary bg-opacity-5" : "border-border bg-surface"
       }`}
     >
-      <label className="flex items-start gap-3 cursor-pointer">
-        <input type="checkbox" checked={selected} onChange={onToggle} className="mt-1" />
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-white mb-2">{img.title}</p>
-          <div className="aspect-video bg-background rounded-lg overflow-hidden mb-2 flex items-center justify-center">
-            {displayUrl ? (
-              <img src={displayUrl} alt={img.title} className="w-full h-full object-cover" />
-            ) : (
-              <ImageIcon className="text-border" size={32} />
-            )}
-          </div>
-          <p className="text-xs text-textMuted line-clamp-3">{img.imagePrompt}</p>
-        </div>
-      </label>
+      <div className="flex items-start gap-2 mb-2" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          className="mt-0.5 rounded border-border"
+          aria-label={`Include ${img.title} in final video`}
+        />
+        <p className="text-sm font-medium text-white flex-1 min-w-0">{img.title}</p>
+      </div>
+      <div className="aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border">
+        {displayUrl ? (
+          <img src={displayUrl} alt={img.title} className="w-full h-full object-cover" />
+        ) : (
+          <ImageIcon className="text-border" size={32} />
+        )}
+      </div>
+      <p
+        className="text-xs text-textMuted mt-2 leading-relaxed line-clamp-4"
+        title={img.transcriptExcerpt}
+      >
+        {img.transcriptExcerpt}
+      </p>
     </div>
   );
 }
@@ -823,7 +1095,7 @@ function PromptPanel({
   hasAnalysis: boolean;
 }) {
   return (
-    <div className="w-[340px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto">
+    <div className="w-[260px] lg:w-[280px] xl:w-[300px] min-w-[240px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto">
       <div className="bg-surface border border-border rounded-xl flex flex-col overflow-hidden">
         <PromptPanelHeader />
         <div className="p-5 flex-1 overflow-y-auto">

@@ -36,7 +36,7 @@ export const Sidebar = () => {
   ];
 
   return (
-    <aside className="w-64 bg-background border-r border-border border-opacity-50 flex flex-col justify-between h-screen p-4 text-textMain transition-all">
+    <aside className="w-64 min-w-[14rem] flex-shrink-0 bg-background border-r border-border border-opacity-50 flex flex-col justify-between h-screen p-4 text-textMain transition-all">
       <div className="flex flex-col space-y-6">
         <div className="flex items-center gap-3 px-2">
           <div className="bg-primary bg-opacity-20 text-primary w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg">
