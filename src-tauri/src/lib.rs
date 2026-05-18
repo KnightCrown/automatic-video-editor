@@ -23,7 +23,8 @@ use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
     load_overlay_images_manifest, load_project, load_transcript,
     load_transcript_analysis, load_transcript_for_video, project_paths, save_final_video_timeline,
-    save_project, save_transcript_analysis, sync_videos_in_manifest,
+    refresh_video_statuses_in_manifest, save_project, save_transcript_analysis,
+    set_video_pipeline_status, sync_videos_in_manifest,
 };
 use crate::video::composite::export_video_with_overlays;
 use crate::video::export_session::VideoExportController;
@@ -147,7 +148,7 @@ fn open_project(root_path: String) -> Result<ProjectManifest, String> {
 
 #[tauri::command]
 fn get_project(root_path: String) -> Result<ProjectManifest, String> {
-    load_project(&root_path)
+    refresh_video_statuses_in_manifest(&root_path)
 }
 
 #[tauri::command]
@@ -268,6 +269,7 @@ async fn analyze_transcript_with_openai(
 
     let analysis = analyze_transcript_for_overlays(&transcript, &manifest.settings).await?;
     save_transcript_analysis(&paths, &analysis)?;
+    set_video_pipeline_status(&root_path, &video_id, "analyzed")?;
     Ok(analysis)
 }
 

@@ -315,6 +315,62 @@ pub fn video_id_from_path(path: &str) -> String {
         .to_string()
 }
 
+/// Derive pipeline stage from artifacts on disk (transcript → analysis → images).
+pub fn resolve_video_status_from_artifacts(
+    paths: &ProjectPaths,
+    video_id: &str,
+    video_path: &str,
+) -> Result<String, String> {
+    if let Some(img_manifest) = load_overlay_images_manifest(paths, video_id)? {
+        if !img_manifest.images.is_empty() {
+            return Ok("images_generated".to_string());
+        }
+    }
+    if load_transcript_analysis(paths, video_id)?.is_some() {
+        return Ok("analyzed".to_string());
+    }
+    if has_transcript_for_video(paths, video_id, video_path)? {
+        return Ok("transcribed".to_string());
+    }
+    Ok("pending".to_string())
+}
+
+pub fn set_video_pipeline_status(
+    root: &str,
+    video_id: &str,
+    status: &str,
+) -> Result<ProjectManifest, String> {
+    let mut manifest = load_project(root)?;
+    if let Some(video) = manifest.videos.iter_mut().find(|v| v.id == video_id) {
+        video.status = status.to_string();
+        if status != "failed" {
+            video.error = None;
+        }
+    }
+    save_project(&manifest)?;
+    Ok(manifest)
+}
+
+/// Reconcile each video's status with saved pipeline artifacts (fixes legacy projects).
+pub fn refresh_video_statuses_in_manifest(root: &str) -> Result<ProjectManifest, String> {
+    let paths = project_paths(root)?;
+    let mut manifest = load_project(root)?;
+    for video in manifest.videos.iter_mut() {
+        if video.status == "failed" {
+            continue;
+        }
+        if matches!(
+            video.status.as_str(),
+            "processing" | "transcribing" | "analyzing" | "generating_images"
+        ) {
+            continue;
+        }
+        video.status = resolve_video_status_from_artifacts(&paths, &video.id, &video.path)?;
+    }
+    save_project(&manifest)?;
+    Ok(manifest)
+}
+
 pub fn sync_videos_in_manifest(
     root: &str,
     discovered: Vec<VideoJob>,
@@ -329,17 +385,20 @@ pub fn sync_videos_in_manifest(
 
     let mut merged = Vec::with_capacity(discovered.len());
     for mut video in discovered {
-        if has_transcript_for_video(&paths, &video.id, &video.path)? {
-            video.status = "transcribed".to_string();
-            video.error = None;
-        } else if let Some(prev) = previous.get(&video.id) {
-            if prev.path == video.path {
-                video.status = prev.status.clone();
-                video.error = prev.error.clone();
-            } else {
+        if let Some(prev) = previous.get(&video.id) {
+            if prev.path != video.path {
                 video.status = "pending".to_string();
                 video.error = None;
+            } else if prev.status == "failed" {
+                video.status = "failed".to_string();
+                video.error = prev.error.clone();
+            } else {
+                video.status = resolve_video_status_from_artifacts(&paths, &video.id, &video.path)?;
+                video.error = None;
             }
+        } else {
+            video.status = resolve_video_status_from_artifacts(&paths, &video.id, &video.path)?;
+            video.error = None;
         }
         merged.push(video);
     }

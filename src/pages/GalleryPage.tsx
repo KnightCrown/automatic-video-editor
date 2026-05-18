@@ -1,309 +1,381 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { Search, LayoutGrid, LayoutList, Check, Heart, Download } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
-import { EpisodeAccordion, type EpisodePanelSpec } from "../components/EpisodeAccordion";
 import {
   getOverlayImageDisplayUrl,
   getOverlayImagesManifest,
 } from "../services/pipelineService";
 import type { GeneratedOverlayImage, OverlayImagesManifest } from "../types/pipeline";
-import { downloadFromUrl, sanitizeDownloadFilename, savePngListToChosenFolder } from "../utils/download";
+import { downloadFromUrl, sanitizeDownloadFilename } from "../utils/download";
+import { excerptSnippet } from "../utils/format";
 
-async function downloadAllEpisodeImages(
-  videoId: string,
-  manifest: OverlayImagesManifest,
-  displayUrls: Record<string, string>,
-): Promise<void> {
-  const images = manifest.images.filter((img) => displayUrls[img.suggestionId]);
-  const items = images.map((img) => {
-    const name = `${sanitizeDownloadFilename(img.title)}-${img.suggestionId.slice(0, 8)}.png`;
-    return {
-      url: displayUrls[img.suggestionId],
-      filename: `${videoId}-${name}`,
-    };
-  });
-  await savePngListToChosenFolder(items);
-}
+type GalleryItem = {
+  videoId: string;
+  videoFileName: string;
+  img: GeneratedOverlayImage;
+  manifest: OverlayImagesManifest;
+};
 
-function excerptSnippet(text: string, maxLen: number): string {
-  const t = text.trim();
-  if (t.length <= maxLen) return t;
-  return `${t.slice(0, maxLen)}…`;
+function itemKey(item: GalleryItem): string {
+  return `${item.videoId}:${item.img.suggestionId}`;
 }
 
 export function GalleryPage() {
   const { project } = useProject();
-  const location = useLocation();
-  const transcribedVideos = useMemo(
-    () => project?.videos.filter((v) => v.status === "transcribed") ?? [],
-    [project?.videos],
-  );
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [search, setSearch] = useState("");
+  const [episodeFilter, setEpisodeFilter] = useState<string>("all");
+  const [items, setItems] = useState<GalleryItem[]>([]);
+  const [displayUrls, setDisplayUrls] = useState<Record<string, string>>({});
+  const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const [manifestByVideo, setManifestByVideo] = useState<
-    Record<string, OverlayImagesManifest | null>
-  >({});
-  const [displayUrlsByVideo, setDisplayUrlsByVideo] = useState<
-    Record<string, Record<string, string>>
-  >({});
-  const [previewErrorsByVideo, setPreviewErrorsByVideo] = useState<
-    Record<string, Record<string, string>>
-  >({});
-  const [downloadingVideoId, setDownloadingVideoId] = useState<string | null>(null);
+  const projectVideos = useMemo(() => project?.videos ?? [], [project?.videos]);
 
-  useEffect(() => {
-    if (!project || transcribedVideos.length === 0) {
-      setManifestByVideo({});
+  const loadGallery = useCallback(async () => {
+    if (!project) {
+      setItems([]);
       return;
     }
-    let cancelled = false;
-    void (async () => {
-      const entries = await Promise.all(
-        transcribedVideos.map(async (v) => {
-          const m = await getOverlayImagesManifest(project.rootPath, v.id);
-          return [v.id, m] as const;
-        }),
+    setLoading(true);
+    try {
+      const all: GalleryItem[] = [];
+      for (const video of projectVideos) {
+        const manifest = await getOverlayImagesManifest(project.rootPath, video.id);
+        if (!manifest?.images.length) continue;
+        for (const img of manifest.images) {
+          all.push({
+            videoId: video.id,
+            videoFileName: video.fileName,
+            img,
+            manifest,
+          });
+        }
+      }
+      all.sort(
+        (a, b) =>
+          new Date(b.img.generatedAt).getTime() - new Date(a.img.generatedAt).getTime(),
       );
-      if (cancelled) return;
-      setManifestByVideo(Object.fromEntries(entries));
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [project, transcribedVideos, location.pathname]);
+      setItems(all);
+    } finally {
+      setLoading(false);
+    }
+  }, [project, projectVideos]);
 
   useEffect(() => {
-    if (!project?.rootPath) {
-      setDisplayUrlsByVideo({});
-      setPreviewErrorsByVideo({});
+    void loadGallery();
+  }, [loadGallery]);
+
+  useEffect(() => {
+    if (!project?.rootPath || items.length === 0) {
+      setDisplayUrls({});
+      setPreviewErrors({});
       return;
     }
-    const rp = project.rootPath;
     let cancelled = false;
     void (async () => {
-      const entries = Object.entries(manifestByVideo);
-      const urlOut: Record<string, Record<string, string>> = {};
-      const errOut: Record<string, Record<string, string>> = {};
+      const urls: Record<string, string> = {};
+      const errs: Record<string, string> = {};
       await Promise.all(
-        entries.map(async ([videoId, manifest]) => {
-          if (!manifest?.images?.length) {
-            urlOut[videoId] = {};
-            errOut[videoId] = {};
-            return;
+        items.map(async (item) => {
+          const key = itemKey(item);
+          try {
+            urls[key] = await getOverlayImageDisplayUrl(
+              project.rootPath,
+              item.img.relativePath,
+            );
+          } catch (e) {
+            errs[key] = String(e);
           }
-          const results = await Promise.all(
-            manifest.images.map(async (img) => {
-              try {
-                const url = await getOverlayImageDisplayUrl(rp, img.relativePath);
-                return { id: img.suggestionId, ok: true as const, url };
-              } catch (e) {
-                return { id: img.suggestionId, ok: false as const, message: String(e) };
-              }
-            }),
-          );
-          const urls: Record<string, string> = {};
-          const errs: Record<string, string> = {};
-          for (const r of results) {
-            if (r.ok) urls[r.id] = r.url;
-            else errs[r.id] = r.message;
-          }
-          urlOut[videoId] = urls;
-          errOut[videoId] = errs;
         }),
       );
       if (!cancelled) {
-        setDisplayUrlsByVideo(urlOut);
-        setPreviewErrorsByVideo(errOut);
+        setDisplayUrls(urls);
+        setPreviewErrors(errs);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [project?.rootPath, manifestByVideo]);
+  }, [project?.rootPath, items]);
 
-  const handleDownloadAll = useCallback(
-    async (videoId: string) => {
-      const manifest = manifestByVideo[videoId];
-      const urls = displayUrlsByVideo[videoId];
-      if (!manifest?.images?.length || !urls) return;
-      const ready = manifest.images.some((img) => urls[img.suggestionId]);
-      if (!ready) return;
-      setDownloadingVideoId(videoId);
-      try {
-        await downloadAllEpisodeImages(videoId, manifest, urls);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setDownloadingVideoId(null);
-      }
-    },
-    [manifestByVideo, displayUrlsByVideo],
-  );
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter((item) => {
+      if (episodeFilter !== "all" && item.videoId !== episodeFilter) return false;
+      if (!q) return true;
+      const hay =
+        `${item.img.title} ${item.img.transcriptExcerpt} ${item.videoFileName}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [items, search, episodeFilter]);
 
-  const panels: EpisodePanelSpec[] = useMemo(
-    () =>
-      transcribedVideos.map((v) => {
-        const manifest = manifestByVideo[v.id] ?? null;
-        const urls = displayUrlsByVideo[v.id];
-        const canDownloadAll =
-          !!manifest?.images?.length &&
-          !!urls &&
-          manifest.images.some((img) => urls[img.suggestionId]);
-
-        return {
-          id: v.id,
-          title: v.fileName,
-          subtitle: v.status,
-          headerActions: (
-            <button
-              type="button"
-              className="btn small primary"
-              disabled={downloadingVideoId === v.id || !canDownloadAll}
-              onClick={() => void handleDownloadAll(v.id)}
-            >
-              {downloadingVideoId === v.id ? "Downloading…" : "Download all"}
-            </button>
-          ),
-          renderContent: () => (
-            <GalleryEpisodeBody
-              manifest={manifest}
-              displayUrls={displayUrlsByVideo[v.id] ?? {}}
-              previewErrors={previewErrorsByVideo[v.id] ?? {}}
-              videoId={v.id}
-            />
-          ),
-        };
-      }),
-    [
-      transcribedVideos,
-      manifestByVideo,
-      displayUrlsByVideo,
-      previewErrorsByVideo,
-      downloadingVideoId,
-      handleDownloadAll,
-    ],
-  );
+  const selected = useMemo(() => {
+    if (!selectedKey) return filtered[0] ?? null;
+    return filtered.find((i) => itemKey(i) === selectedKey) ?? filtered[0] ?? null;
+  }, [filtered, selectedKey]);
 
   if (!project) {
     return (
-      <section className="page">
-        <p className="muted">Open a project first from the Projects page.</p>
-      </section>
+      <NoProjectMessage />
     );
   }
 
   return (
-    <section className="page">
-      <header className="page-header">
-        <h1>Gallery</h1>
-        <p>
-          Generated overlay images are saved under{" "}
-          <code>.devotiontime/images/&lt;episode&gt;/</code> in your project. Browse by episode,
-          preview, and download PNGs. Each card shows a short <strong>transcript</strong> excerpt
-          the image was based on.
-        </p>
-      </header>
+    <div className="flex-1 flex flex-col p-6 h-full overflow-hidden">
+      <div className="flex justify-between items-center mb-6 flex-shrink-0">
+        <div>
+          <h1 className="text-2xl font-semibold mb-1 text-white">Gallery</h1>
+          <p className="text-textMuted text-sm">Browse and manage all generated images.</p>
+        </div>
+      </div>
 
-      {transcribedVideos.length === 0 ? (
-        <p className="muted">
-          Transcribe a video first. Images appear here after you generate them on the Images tab.
+      <div className="flex gap-4 mb-6 flex-shrink-0 flex-wrap">
+        <div className="relative flex-1 max-w-sm min-w-[200px]">
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-textMuted"
+            size={16}
+          />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search images..."
+            className="w-full bg-surface border border-border rounded-lg pl-9 pr-4 py-2 text-sm text-white focus:outline-none focus:border-primary"
+          />
+        </div>
+        <select
+          value={episodeFilter}
+          onChange={(e) => setEpisodeFilter(e.target.value)}
+          className="bg-surface border border-border px-3 py-2 rounded-lg text-sm text-white focus:outline-none focus:border-primary"
+        >
+          <option value="all">All episodes</option>
+          {projectVideos.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.fileName}
+            </option>
+          ))}
+        </select>
+        <ViewModeToggle viewMode={viewMode} setViewMode={setViewMode} />
+      </div>
+
+      <GalleryCountRow loading={loading} count={filtered.length} />
+
+      {projectVideos.length === 0 ? (
+        <p className="text-textMuted text-sm">
+          Transcribe videos first. Images appear here after you generate them in Editing.
+        </p>
+      ) : filtered.length === 0 && !loading ? (
+        <p className="text-textMuted text-sm">
+          No generated images yet. Open Editing and run Generate images.
         </p>
       ) : (
-        <EpisodeAccordion panels={panels} />
+        <div className="flex-1 flex gap-6 overflow-hidden min-h-0">
+          <GalleryGrid
+            filtered={filtered}
+            viewMode={viewMode}
+            displayUrls={displayUrls}
+            previewErrors={previewErrors}
+            selectedKey={selected ? itemKey(selected) : null}
+            onSelect={setSelectedKey}
+          />
+          {selected && (
+            <GalleryDetailPanel
+              item={selected}
+              displayUrl={displayUrls[itemKey(selected)]}
+              previewError={previewErrors[itemKey(selected)]}
+            />
+          )}
+        </div>
       )}
-    </section>
+    </div>
   );
 }
 
-function GalleryEpisodeBody({
-  videoId,
-  manifest,
+function NoProjectMessage() {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center p-6">
+      <p className="text-textMuted text-sm">Open a project from Overview first.</p>
+    </div>
+  );
+}
+
+function GalleryCountRow({ loading, count }: { loading: boolean; count: number }) {
+  return (
+    <div className="flex justify-between items-center mb-4 flex-shrink-0">
+      <span className="text-sm text-textMuted">
+        {loading ? "Loading…" : `${count} image${count === 1 ? "" : "s"}`}
+      </span>
+      <span className="text-sm text-textMuted">Sort by: Newest</span>
+    </div>
+  );
+}
+
+function ViewModeToggle({
+  viewMode,
+  setViewMode,
+}: {
+  viewMode: "grid" | "list";
+  setViewMode: (m: "grid" | "list") => void;
+}) {
+  return (
+    <div className="ml-auto flex bg-surface border border-border rounded-lg p-1">
+      <button
+        type="button"
+        onClick={() => setViewMode("list")}
+        className={`p-1.5 rounded ${viewMode === "list" ? "bg-primary bg-opacity-20 text-primary" : "text-textMuted"}`}
+      >
+        <LayoutList size={16} />
+      </button>
+      <button
+        type="button"
+        onClick={() => setViewMode("grid")}
+        className={`p-1.5 rounded ${viewMode === "grid" ? "bg-primary text-white" : "text-textMuted"}`}
+      >
+        <LayoutGrid size={16} />
+      </button>
+    </div>
+  );
+}
+
+function GalleryGrid({
+  filtered,
+  viewMode,
   displayUrls,
   previewErrors,
+  selectedKey,
+  onSelect,
 }: {
-  videoId: string;
-  manifest: OverlayImagesManifest | null;
+  filtered: GalleryItem[];
+  viewMode: "grid" | "list";
   displayUrls: Record<string, string>;
   previewErrors: Record<string, string>;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
 }) {
-  if (!manifest || manifest.images.length === 0) {
-    return (
-      <p className="muted">
-        No generated images for this episode yet. Use the <strong>Images</strong> tab and run{" "}
-        <em>Generate images</em>.
-      </p>
-    );
-  }
-
   return (
-    <>
-      <p className="muted" style={{ marginTop: 0 }}>
-        {manifest.images.length} image{manifest.images.length === 1 ? "" : "s"} ·{" "}
-        {new Date(manifest.generatedAt).toLocaleString()} · {manifest.model}
-      </p>
-      <div className="gallery-grid">
-        {manifest.images.map((img) => (
-          <GalleryImageCard
-            key={img.suggestionId}
-            img={img}
-            displayUrl={displayUrls[img.suggestionId]}
-            previewError={previewErrors[img.suggestionId]}
-            videoId={videoId}
-          />
-        ))}
-      </div>
-    </>
+    <div
+      className={`flex-1 min-h-0 min-w-0 overflow-y-auto pr-2 ${
+        viewMode === "grid"
+          ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 auto-rows-min content-start"
+          : "flex flex-col gap-3"
+      }`}
+    >
+      {filtered.map((item) => {
+        const key = itemKey(item);
+        const url = displayUrls[key];
+        const isSelected = selectedKey === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onSelect(key)}
+            className={`text-left bg-surface border rounded-xl overflow-hidden transition-colors ${
+              isSelected ? "border-primary" : "border-border hover:border-gray-600"
+            } ${viewMode === "grid" ? "w-full min-w-0 self-start flex flex-col" : "flex gap-4 p-3 w-full"}`}
+          >
+            <div
+              className={`bg-background relative flex items-center justify-center overflow-hidden ${
+                viewMode === "list" ? "w-32 h-20 flex-shrink-0 rounded-lg" : "aspect-square"
+              }`}
+            >
+              {url ? (
+                <img src={url} alt={item.img.title} className="w-full h-full object-cover" />
+              ) : previewErrors[key] ? (
+                <span className="text-xs text-danger p-2">{previewErrors[key]}</span>
+              ) : (
+                <span className="text-textMuted text-xs">Loading…</span>
+              )}
+              {isSelected && (
+                <div className="absolute top-2 left-2 bg-primary text-white p-1 rounded">
+                  <Check size={14} />
+                </div>
+              )}
+            </div>
+            <div className={viewMode === "list" ? "flex-1 min-w-0 py-1" : "p-3"}>
+              <p className="text-sm text-white font-medium truncate mb-1">{item.img.title}</p>
+              <p className="text-xs text-textMuted mb-2 truncate">{item.videoFileName}</p>
+              <p className="text-[10px] text-textMuted uppercase">
+                {new Date(item.img.generatedAt).toLocaleDateString()}
+              </p>
+            </div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-function GalleryImageCard({
-  img,
+function GalleryDetailPanel({
+  item,
   displayUrl,
   previewError,
-  videoId,
 }: {
-  img: GeneratedOverlayImage;
+  item: GalleryItem;
   displayUrl?: string;
   previewError?: string;
-  videoId: string;
 }) {
-  const name = `${sanitizeDownloadFilename(img.title)}-${img.suggestionId.slice(0, 8)}.png`;
-  const excerpt = img.transcriptExcerpt?.trim() ?? "";
-  const excerptPreview = excerptSnippet(excerpt, 160);
+  const fileName = `${sanitizeDownloadFilename(item.img.title)}-${item.img.suggestionId.slice(0, 8)}.png`;
 
   return (
-    <div className="gallery-card">
-      <h4>{img.title}</h4>
-      <p className="muted gallery-card-excerpt" title={excerpt || undefined}>
-        {excerpt ? (
-          <>
-            <strong>Transcript</strong> · {excerptPreview}
-          </>
-        ) : (
-          <span className="muted">No transcript excerpt on file for this image.</span>
-        )}
-      </p>
-      <div>
+    <div className="w-[340px] flex-shrink-0 flex flex-col bg-surface border border-border rounded-xl overflow-hidden hidden xl:flex">
+      <div className="aspect-video bg-background border-b border-border flex items-center justify-center">
         {displayUrl ? (
-          <img src={displayUrl} alt={img.title} />
+          <img src={displayUrl} alt={item.img.title} className="w-full h-full object-contain" />
         ) : previewError ? (
-          <p className="error" style={{ margin: 0, fontSize: "0.85rem" }}>
-            Could not load: {previewError}
-          </p>
+          <p className="text-xs text-danger p-4">{previewError}</p>
         ) : (
-          <p className="muted">Loading…</p>
+          <p className="text-textMuted text-sm">Loading…</p>
         )}
       </div>
-      {displayUrl && (
-        <button
-          type="button"
-          className="btn small primary"
-          onClick={() => {
-            void downloadFromUrl(displayUrl, `${videoId}-${name}`);
-          }}
-        >
-          Download PNG
-        </button>
-      )}
+      <div className="p-5 flex-1 overflow-y-auto flex flex-col">
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <h3 className="text-lg text-white font-semibold">{item.img.title}</h3>
+          <Heart size={16} className="text-textMuted flex-shrink-0" aria-hidden />
+        </div>
+        <p className="text-xs text-textMuted mb-4 pb-4 border-b border-border">
+          {item.videoFileName}
+        </p>
+        <div className="space-y-4 mb-6 text-sm flex-1">
+          <DetailBlock label="Prompt" value={item.img.imagePrompt} />
+          <DetailRow label="Model" value={item.manifest.model} />
+          <DetailRow label="Created" value={new Date(item.img.generatedAt).toLocaleString()} />
+          {item.img.transcriptExcerpt ? (
+            <DetailBlock
+              label="Transcript excerpt"
+              value={excerptSnippet(item.img.transcriptExcerpt, 400)}
+            />
+          ) : null}
+        </div>
+        {displayUrl && (
+          <button
+            type="button"
+            onClick={() => void downloadFromUrl(displayUrl, `${item.videoId}-${fileName}`)}
+            className="w-full py-3 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+          >
+            <Download size={16} /> Download
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs text-textMuted mb-1 font-semibold">{label}</p>
+      <p className="text-white leading-relaxed text-sm">{value}</p>
+    </div>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <span className="text-textMuted">{label}</span>
+      <span className="text-white text-right text-sm">{value}</span>
     </div>
   );
 }

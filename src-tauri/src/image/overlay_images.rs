@@ -7,7 +7,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::image::xai_imagine::generate_imagine_png;
 use crate::store::project::{
-    load_transcript_analysis, overlay_video_image_dir, project_paths, save_overlay_images_manifest,
+    load_transcript_analysis, overlay_video_image_dir, project_paths,
+    save_overlay_images_manifest, set_video_pipeline_status,
 };
 use crate::store::secrets::get_xai_api_key;
 use crate::types::{
@@ -94,6 +95,7 @@ pub async fn generate_overlay_images_for_video(
     })?;
 
     let paths = project_paths(&root_path)?;
+    let _ = set_video_pipeline_status(&root_path, &video_id, "generating_images");
     let analysis = load_transcript_analysis(&paths, &video_id)?.ok_or_else(|| {
         "analysis_not_found: Run Overlays → Analyze transcript first.".to_string()
     })?;
@@ -167,6 +169,7 @@ pub async fn generate_overlay_images_for_video(
     };
 
     save_overlay_images_manifest(&paths, &manifest)?;
+    let _ = set_video_pipeline_status(&root_path, &video_id, "images_generated");
 
     let _ = app.emit(
         "image_generation_progress",

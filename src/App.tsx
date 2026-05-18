@@ -1,68 +1,32 @@
-import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { ProjectProvider } from "./context/ProjectContext";
 import { VideoExportProvider } from "./context/VideoExportContext";
-import { ProjectsPage } from "./pages/ProjectsPage";
-import { TranscribePage } from "./pages/TranscribePage";
-import { OverlaysPage } from "./pages/OverlaysPage";
-import { ImagesPage } from "./pages/ImagesPage";
+import { OverviewPage } from "./pages/OverviewPage";
+import { EditingPage } from "./pages/EditingPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { FinalVideoPage } from "./pages/FinalVideoPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { Sidebar } from "./components/layout/Sidebar";
 import "./App.css";
 
 function App() {
   return (
     <ProjectProvider>
       <VideoExportProvider>
-      <BrowserRouter>
-        <div className="app-shell">
-          <nav className="sidebar">
-            <div className="brand">
-              <span className="brand-mark">DT</span>
-              <div>
-                <strong>DevotionTime</strong>
-                <p>Overlay Generator</p>
-              </div>
-            </div>
-            <div className="sidebar-main-nav">
-              <NavLink to="/" end className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Projects
-              </NavLink>
-              <NavLink to="/transcribe" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Transcribe
-              </NavLink>
-              <NavLink to="/overlays" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Overlays
-              </NavLink>
-              <NavLink to="/images" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Images
-              </NavLink>
-              <NavLink to="/final-video" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Final Video
-              </NavLink>
-            </div>
-            <div className="sidebar-bottom-nav">
-              <NavLink to="/gallery" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Gallery
-              </NavLink>
-              <NavLink to="/settings" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
-                Settings
-              </NavLink>
-            </div>
-          </nav>
-          <main className="main-content">
-            <Routes>
-              <Route path="/" element={<ProjectsPage />} />
-              <Route path="/transcribe" element={<TranscribePage />} />
-              <Route path="/overlays" element={<OverlaysPage />} />
-              <Route path="/images" element={<ImagesPage />} />
-              <Route path="/final-video" element={<FinalVideoPage />} />
-              <Route path="/gallery" element={<GalleryPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </main>
-        </div>
-      </BrowserRouter>
+        <BrowserRouter>
+          <div className="flex h-screen bg-[#0F111A] text-textMain overflow-hidden font-sans">
+            <Sidebar />
+            <main className="flex-1 flex flex-col h-screen overflow-hidden bg-background">
+              <Routes>
+                <Route path="/" element={<OverviewPage />} />
+                <Route path="/editing" element={<EditingPage />} />
+                <Route path="/final-video" element={<FinalVideoPage />} />
+                <Route path="/gallery" element={<GalleryPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+              </Routes>
+            </main>
+          </div>
+        </BrowserRouter>
       </VideoExportProvider>
     </ProjectProvider>
   );
