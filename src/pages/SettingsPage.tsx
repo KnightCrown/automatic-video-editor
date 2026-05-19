@@ -1,19 +1,17 @@
 import { useEffect, useState } from "react";
 import {
-  CheckCircle2,
   RefreshCw,
   Trash2,
   Key,
   Sparkles,
   Mic,
-  Sliders,
   Film,
 } from "lucide-react";
+import { OverlaySettingsModal } from "../components/OverlaySettingsModal";
 import { useProject } from "../context/ProjectContext";
 import {
   deleteParakeetModel,
   downloadParakeetModel,
-  getParakeetModelInfo,
   isParakeetModelReady,
 } from "../services/parakeetModelService";
 import {
@@ -29,13 +27,14 @@ import {
   updateProjectSettings,
 } from "../services/pipelineService";
 import type {
+  OverlayClipLayout,
   ParakeetDownloadProgress,
-  ParakeetModelFile,
   VideoExportEncoderKind,
   VideoExportMode,
   VideoExportPreflight,
   VideoExportQuality,
 } from "../types/pipeline";
+import { overlayLayoutFromSettings } from "../utils/overlayLayout";
 
 function encoderKindLabel(kind: VideoExportEncoderKind): string {
   switch (kind) {
@@ -55,7 +54,6 @@ function encoderKindLabel(kind: VideoExportEncoderKind): string {
 export function SettingsPage() {
   const { project, setProject } = useProject();
   const [modelReady, setModelReady] = useState(false);
-  const [modelFiles, setModelFiles] = useState<ParakeetModelFile[]>([]);
   const [downloadProgress, setDownloadProgress] =
     useState<ParakeetDownloadProgress | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
@@ -92,6 +90,10 @@ export function SettingsPage() {
   const [exportPreflight, setExportPreflight] = useState<VideoExportPreflight | null>(
     null,
   );
+  const [overlayLayout, setOverlayLayout] = useState<OverlayClipLayout>(() =>
+    overlayLayoutFromSettings(project?.settings),
+  );
+  const [overlaySettingsOpen, setOverlaySettingsOpen] = useState(false);
 
   useEffect(() => {
     void refreshModelStatus();
@@ -107,13 +109,11 @@ export function SettingsPage() {
     setTranscriptTimingOffsetMs(project.settings.transcriptTimingOffsetMs ?? 0);
     setVideoExportMode(project.settings.videoExportMode ?? "auto");
     setVideoExportQuality(project.settings.videoExportQuality ?? "balanced");
+    setOverlayLayout(overlayLayoutFromSettings(project.settings));
   }, [project]);
 
   async function refreshModelStatus() {
-    const ready = await isParakeetModelReady();
-    setModelReady(ready);
-    if (ready) setModelFiles(await getParakeetModelInfo());
-    else setModelFiles([]);
+    setModelReady(await isParakeetModelReady());
   }
 
   async function refreshKeys() {
@@ -130,7 +130,6 @@ export function SettingsPage() {
     try {
       await downloadParakeetModel(setDownloadProgress);
       setModelReady(true);
-      setModelFiles(await getParakeetModelInfo());
       setMessage("Parakeet model downloaded.");
     } catch (err) {
       setError(String(err));
@@ -146,7 +145,6 @@ export function SettingsPage() {
     try {
       await deleteParakeetModel();
       setModelReady(false);
-      setModelFiles([]);
       setMessage("Parakeet model deleted.");
     } catch (err) {
       setError(String(err));
@@ -166,7 +164,7 @@ export function SettingsPage() {
       await saveApiKey(apiKey);
       setApiKey("");
       await refreshKeys();
-      setMessage(apiKeyStorageHint ? `API key saved.` : "API key saved.");
+      setMessage("OpenAI API key saved.");
     } catch (err) {
       setError(String(err));
     }
@@ -183,7 +181,7 @@ export function SettingsPage() {
       await saveXaiApiKey(xaiKey);
       setXaiKey("");
       await refreshKeys();
-      setMessage("xAI key saved.");
+      setMessage("xAI API key saved.");
     } catch (err) {
       setError(String(err));
     }
@@ -205,9 +203,30 @@ export function SettingsPage() {
         })(),
         videoExportMode,
         videoExportQuality,
+        defaultOverlayLayout: overlayLayout,
       });
       setProject(manifest);
       setMessage("Project settings saved.");
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleSaveOverlayLayout(layout: OverlayClipLayout) {
+    setOverlayLayout(layout);
+    setOverlaySettingsOpen(false);
+    if (!project) {
+      setMessage("Overlay position saved. Open a project to persist with other settings.");
+      return;
+    }
+    setError(null);
+    try {
+      const manifest = await updateProjectSettings(project.rootPath, {
+        ...project.settings,
+        defaultOverlayLayout: layout,
+      });
+      setProject(manifest);
+      setMessage("Overlay position saved.");
     } catch (err) {
       setError(String(err));
     }
@@ -234,78 +253,21 @@ export function SettingsPage() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="col-span-1 lg:col-span-2 xl:col-span-1 bg-surface border border-border rounded-xl p-6">
-          <div className="flex justify-between items-start mb-2">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <Mic className="text-[#8B5CF6]" size={20} /> Parakeet speech model (local)
-            </h2>
-            <span
-              className={`text-xs px-2.5 py-1 rounded-md font-medium border ${
-                modelReady
-                  ? "bg-success bg-opacity-20 text-success border-success border-opacity-30"
-                  : "bg-textMuted bg-opacity-20 text-textMuted border-border"
-              }`}
-            >
-              {modelReady ? "Ready" : "Missing"}
-            </span>
-          </div>
-          <p className="text-sm text-textMuted mb-6">
-            English TDT v3 INT8 (~670 MB). Transcription runs entirely on your device.
-          </p>
+        <div className="bg-surface border border-border rounded-xl p-6 space-y-8">
+          <ParakeetSection
+            modelReady={modelReady}
+            modelBusy={modelBusy}
+            downloadProgress={downloadProgress}
+            onDownload={() => void handleDownloadModel()}
+            onDelete={() => void handleDeleteModel()}
+          />
 
-          <div className="bg-[#151821] rounded-lg p-4 border border-border mb-6">
-            <p className="text-xs font-semibold text-textMuted uppercase tracking-wider mb-3">
-              Model files
-            </p>
-            {modelReady && modelFiles.length > 0 ? (
-              <ul className="space-y-2.5 text-sm text-textMuted">
-                {modelFiles.map((f) => (
-                  <li key={f.fileName} className="flex justify-between items-center">
-                    <span className="flex items-center gap-2 text-white">
-                      <CheckCircle2 className="text-success" size={14} /> {f.fileName}
-                    </span>
-                    <span className="text-xs">{f.sizeLabel}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : downloadProgress ? (
-              <div>
-                <p className="text-sm text-white mb-2">
-                  Downloading {downloadProgress.fileName} ({downloadProgress.fileIndex}/
-                  {downloadProgress.fileCount})
-                </p>
-                <DownloadProgressBar progress={downloadProgress.progress ?? 0} />
-              </div>
-            ) : (
-              <p className="text-sm text-textMuted">Files not downloaded.</p>
-            )}
-          </div>
+          <div className="border-t border-border" />
 
-          <div className="flex gap-3">
-            <button
-              type="button"
-              disabled={modelBusy || modelReady}
-              onClick={() => void handleDownloadModel()}
-              className="bg-primary hover:bg-primaryHover text-white px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
-            >
-              <RefreshCw size={16} /> {modelBusy ? "Downloading…" : "Download model"}
-            </button>
-            <button
-              type="button"
-              disabled={modelBusy || !modelReady}
-              onClick={() => void handleDeleteModel()}
-              className="bg-transparent border border-border text-textMuted hover:text-white px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
-            >
-              <Trash2 size={16} /> Delete model
-            </button>
-          </div>
-        </div>
-
-        <div className="col-span-1 lg:col-span-2 xl:col-span-1 space-y-6 flex flex-col">
-          <ApiKeyCard
+          <ApiKeySection
             title="OpenAI API"
-            icon={<Sparkles className="text-[#3B82F6]" size={20} />}
-            description="Used for transcript analysis and overlay suggestions."
+            icon={<Sparkles className="text-[#3B82F6]" size={18} />}
+            description="Transcript analysis and overlay suggestions."
             keyValue={apiKey}
             onKeyChange={setApiKey}
             keySet={apiKeySet}
@@ -315,13 +277,16 @@ export function SettingsPage() {
             onClear={async () => {
               await clearApiKey();
               await refreshKeys();
-              setMessage("API key removed.");
+              setMessage("OpenAI API key removed.");
             }}
           />
-          <ApiKeyCard
+
+          <div className="border-t border-border" />
+
+          <ApiKeySection
             title="Grok Imagine (xAI)"
-            icon={<span className="font-bold text-white">xl</span>}
-            description="Used for generating overlay images."
+            icon={<span className="font-bold text-white text-sm">xl</span>}
+            description="Overlay image generation."
             keyValue={xaiKey}
             onKeyChange={setXaiKey}
             keySet={xaiKeySet}
@@ -344,22 +309,8 @@ export function SettingsPage() {
               </a>
             }
           />
-        </div>
 
-        <div className="col-span-1 border border-border rounded-xl flex flex-col overflow-hidden bg-surface">
-          <h2 className="text-sm font-semibold text-white p-5 border-b border-border flex items-center gap-2">
-            <Sliders className="text-[#3B82F6]" size={16} /> Default model settings
-          </h2>
-          <div className="p-5 space-y-4">
-            <label className="block">
-              <span className="text-sm text-white block mb-1.5">Show context (system prompt)</span>
-              <textarea
-                rows={3}
-                value={showContext}
-                onChange={(e) => setShowContext(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
-              />
-            </label>
+          <div className="border-t border-border pt-8 space-y-4">
             <SettingSelect
               label="OpenAI model"
               value={textModel}
@@ -371,6 +322,35 @@ export function SettingsPage() {
               value={grokImagineModel}
               onChange={setGrokImagineModel}
               options={["grok-imagine-image"]}
+            />
+          </div>
+        </div>
+
+        <div className="border border-border rounded-xl flex flex-col overflow-hidden bg-surface">
+          <h2 className="text-sm font-semibold text-white p-5 border-b border-border flex items-center gap-2">
+            <Film className="text-[#10B981]" size={16} /> Output defaults
+          </h2>
+          <div className="p-5 space-y-4 flex-1">
+            <label className="block">
+              <span className="text-sm text-white block mb-1.5">Show context (system prompt)</span>
+              <textarea
+                rows={3}
+                value={showContext}
+                onChange={(e) => setShowContext(e.target.value)}
+                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
+              />
+            </label>
+            <SettingSelect
+              label="Export mode"
+              value={videoExportMode}
+              onChange={(v) => setVideoExportMode(v as VideoExportMode)}
+              options={["auto", "hardware", "software"]}
+            />
+            <SettingSelect
+              label="Export quality"
+              value={videoExportQuality}
+              onChange={(v) => setVideoExportQuality(v as VideoExportQuality)}
+              options={["balanced", "fast"]}
             />
             <label className="flex justify-between items-center gap-4">
               <span className="text-sm text-white">Transcript timing offset (ms)</span>
@@ -385,26 +365,6 @@ export function SettingsPage() {
             <p className="text-xs text-textMuted">
               Positive values shift overlay cues later if speech appears early in the editor.
             </p>
-          </div>
-        </div>
-
-        <div className="col-span-1 border border-border rounded-xl flex flex-col overflow-hidden bg-surface">
-          <h2 className="text-sm font-semibold text-white p-5 border-b border-border flex items-center gap-2">
-            <Film className="text-[#10B981]" size={16} /> Output defaults
-          </h2>
-          <div className="p-5 space-y-4">
-            <SettingSelect
-              label="Export mode"
-              value={videoExportMode}
-              onChange={(v) => setVideoExportMode(v as VideoExportMode)}
-              options={["auto", "hardware", "software"]}
-            />
-            <SettingSelect
-              label="Export quality"
-              value={videoExportQuality}
-              onChange={(v) => setVideoExportQuality(v as VideoExportQuality)}
-              options={["balanced", "fast"]}
-            />
             {exportPreflight && (
               <div className="text-xs text-textMuted space-y-1 pt-2 border-t border-border">
                 {exportPreflight.ffmpegPath && (
@@ -423,9 +383,23 @@ export function SettingsPage() {
                 )}
               </div>
             )}
+            <button
+              type="button"
+              onClick={() => setOverlaySettingsOpen(true)}
+              className="w-full mt-2 py-2.5 rounded-lg text-sm font-medium border border-border text-white hover:bg-background transition-colors"
+            >
+              Overlay settings
+            </button>
           </div>
         </div>
       </div>
+
+      <OverlaySettingsModal
+        open={overlaySettingsOpen}
+        initialLayout={overlayLayout}
+        onClose={() => setOverlaySettingsOpen(false)}
+        onSave={(layout) => void handleSaveOverlayLayout(layout)}
+      />
 
       <div className="mt-6">
         <button
@@ -441,6 +415,77 @@ export function SettingsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function StatusBadge({ ready, readyLabel, missingLabel }: { ready: boolean; readyLabel: string; missingLabel: string }) {
+  return (
+    <span
+      className={`text-xs px-2.5 py-1 rounded-md font-medium border shrink-0 ${
+        ready
+          ? "bg-success bg-opacity-20 text-success border-success border-opacity-30"
+          : "bg-textMuted bg-opacity-20 text-textMuted border-border"
+      }`}
+    >
+      {ready ? readyLabel : missingLabel}
+    </span>
+  );
+}
+
+function ParakeetSection({
+  modelReady,
+  modelBusy,
+  downloadProgress,
+  onDownload,
+  onDelete,
+}: {
+  modelReady: boolean;
+  modelBusy: boolean;
+  downloadProgress: ParakeetDownloadProgress | null;
+  onDownload: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <section>
+      <div className="flex justify-between items-start gap-3 mb-3">
+        <h2 className="text-base font-semibold text-white flex items-center gap-2">
+          <Mic className="text-[#8B5CF6]" size={18} /> Parakeet speech model
+        </h2>
+        <StatusBadge ready={modelReady} readyLabel="Ready" missingLabel="Not installed" />
+      </div>
+      <p className="text-sm text-textMuted mb-4">
+        Local transcription model. Download once to transcribe episodes on your device.
+      </p>
+
+      {downloadProgress && (
+        <div className="mb-4">
+          <p className="text-sm text-white mb-2">
+            Downloading… ({downloadProgress.fileIndex}/{downloadProgress.fileCount})
+          </p>
+          <DownloadProgressBar progress={downloadProgress.progress ?? 0} />
+        </div>
+      )}
+
+      <div className="flex gap-3 flex-wrap">
+        <button
+          type="button"
+          disabled={modelBusy || modelReady}
+          onClick={onDownload}
+          className="bg-primary hover:bg-primaryHover text-white px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+        >
+          <RefreshCw size={16} className={modelBusy ? "animate-spin" : ""} />
+          {modelBusy ? "Downloading…" : "Download model"}
+        </button>
+        <button
+          type="button"
+          disabled={modelBusy || !modelReady}
+          onClick={onDelete}
+          className="bg-transparent border border-border text-textMuted hover:text-white px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+        >
+          <Trash2 size={16} /> Delete model
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -481,7 +526,7 @@ function SettingSelect({
   );
 }
 
-function ApiKeyCard({
+function ApiKeySection({
   title,
   icon,
   description,
@@ -507,22 +552,14 @@ function ApiKeyCard({
   footerLink?: React.ReactNode;
 }) {
   return (
-    <div className="bg-surface border border-border rounded-xl p-6">
-      <div className="flex justify-between items-start mb-2">
-        <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+    <section>
+      <div className="flex justify-between items-start gap-3 mb-2">
+        <h3 className="text-base font-semibold text-white flex items-center gap-2">
           {icon} {title}
-        </h2>
-        <span
-          className={`text-xs px-2.5 py-1 rounded-md font-medium border ${
-            keySet
-              ? "bg-success bg-opacity-20 text-success border-success border-opacity-30"
-              : "bg-danger bg-opacity-20 text-danger border-danger border-opacity-30"
-          }`}
-        >
-          {keySet ? "Key saved" : "Missing"}
-        </span>
+        </h3>
+        <StatusBadge ready={keySet} readyLabel="Key saved" missingLabel="Missing" />
       </div>
-      <p className="text-sm text-textMuted mb-4">{description}</p>
+      <p className="text-sm text-textMuted mb-3">{description}</p>
       {keySet && storageHint && (
         <p className="text-xs text-textMuted mb-2">Stored: {storageHint}</p>
       )}
@@ -531,10 +568,10 @@ function ApiKeyCard({
         value={keyValue}
         onChange={(e) => onKeyChange(e.target.value)}
         placeholder={keySet ? "Enter new key to replace…" : placeholder}
-        className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary mb-4"
+        className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary mb-3"
       />
       <ApiKeyActions onSave={onSave} onClear={onClear} footerLink={footerLink} />
-    </div>
+    </section>
   );
 }
 
@@ -549,7 +586,7 @@ function ApiKeyActions({
 }) {
   return (
     <div className="flex items-center justify-between flex-wrap gap-3">
-      <div className="flex gap-3">
+      <div className="flex gap-3 flex-wrap">
         <button
           type="button"
           onClick={onSave}

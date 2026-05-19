@@ -200,6 +200,9 @@ pub struct ProjectSettings {
     /// `fast` or `balanced` export quality preset.
     #[serde(default = "default_video_export_quality")]
     pub video_export_quality: String,
+    /// Default overlay position for export and new timelines.
+    #[serde(default)]
+    pub default_overlay_layout: OverlayClipLayout,
 }
 
 pub fn default_video_export_mode() -> String {
@@ -232,6 +235,7 @@ impl Default for ProjectSettings {
             transcript_timing_offset_ms: 0,
             video_export_mode: default_video_export_mode(),
             video_export_quality: default_video_export_quality(),
+            default_overlay_layout: OverlayClipLayout::default(),
         }
     }
 }

@@ -164,6 +164,8 @@ export interface ProjectSettings {
   videoExportMode?: VideoExportMode;
   /** fast | balanced */
   videoExportQuality?: VideoExportQuality;
+  /** Default position/size for overlay images on export and preview. */
+  defaultOverlayLayout?: OverlayClipLayout;
 }
 
 export interface ProjectManifest {

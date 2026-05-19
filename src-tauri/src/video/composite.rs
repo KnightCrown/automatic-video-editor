@@ -443,8 +443,12 @@ pub async fn export_video_with_overlays(
     video_path: String,
     video_id: String,
     output_path: String,
-    clips: Vec<VideoOverlayClip>,
+    mut clips: Vec<VideoOverlayClip>,
 ) -> Result<String, String> {
+    let layout = settings.default_overlay_layout.clone();
+    for clip in &mut clips {
+        clip.layout = layout.clone();
+    }
     let emit = |stage: &str, percent: f32, message: Option<String>| {
         let _ = app.emit(
             "video_export_progress",

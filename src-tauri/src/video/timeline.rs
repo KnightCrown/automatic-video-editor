@@ -30,6 +30,7 @@ pub fn default_duration_ms(suggestion: &OverlaySuggestion) -> u64 {
 pub fn build_clips_from_analysis_and_manifest(
     analysis: &TranscriptAnalysis,
     manifest: &OverlayImagesManifest,
+    layout: &OverlayClipLayout,
 ) -> Vec<VideoOverlayClip> {
     let by_id: HashMap<&str, &OverlaySuggestion> = analysis
         .suggestions
@@ -63,7 +64,7 @@ pub fn build_clips_from_analysis_and_manifest(
             title: img.title.clone(),
             start_ms,
             duration_ms,
-            layout: OverlayClipLayout::default(),
+            layout: layout.clone(),
         });
     }
 
@@ -112,7 +113,9 @@ pub fn build_default_timeline(
         .ok_or_else(|| "analysis_not_found".to_string())?;
     let manifest = load_overlay_images_manifest_for_video(&paths, video_id, &video_path)?
         .ok_or_else(|| "overlay_images_not_found".to_string())?;
-    let clips = build_clips_from_analysis_and_manifest(&analysis, &manifest);
+    let project = load_project(root_path)?;
+    let layout = project.settings.default_overlay_layout.clone();
+    let clips = build_clips_from_analysis_and_manifest(&analysis, &manifest, &layout);
     Ok(FinalVideoTimeline {
         video_id: video_id.to_string(),
         clips,

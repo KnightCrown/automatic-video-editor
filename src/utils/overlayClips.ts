@@ -31,6 +31,7 @@ export function defaultDurationMs(suggestion: OverlaySuggestion): number {
 export function buildClipsFromAnalysisAndManifest(
   analysis: TranscriptAnalysis,
   manifest: OverlayImagesManifest,
+  layout: OverlayClipLayout = DEFAULT_OVERLAY_LAYOUT,
 ): VideoOverlayClip[] {
   const byId = new Map(analysis.suggestions.map((s) => [s.id, s]));
   const clips: VideoOverlayClip[] = [];
@@ -44,7 +45,7 @@ export function buildClipsFromAnalysisAndManifest(
       title: img.title,
       startMs: suggestion.startMs ?? 0,
       durationMs: defaultDurationMs(suggestion),
-      layout: { ...DEFAULT_OVERLAY_LAYOUT },
+      layout: { ...layout },
     });
   }
 
