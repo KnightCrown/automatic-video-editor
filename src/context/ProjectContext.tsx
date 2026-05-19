@@ -6,7 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { getProject } from "../services/pipelineService";
+import { openProject } from "../services/pipelineService";
 import type { ProjectManifest } from "../types/pipeline";
 
 interface ProjectContextValue {
@@ -34,7 +34,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const refreshProject = useCallback(async () => {
     const root = project?.rootPath ?? localStorage.getItem(STORAGE_KEY);
     if (!root) return;
-    const manifest = await getProject(root);
+    const manifest = await openProject(root);
     setProjectState(manifest);
   }, [project?.rootPath]);
 

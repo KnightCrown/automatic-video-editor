@@ -159,7 +159,12 @@ pub async fn extract_audio_for_transcription(
     video_path: String,
     output_wav: String,
     job_id: String,
+    batch: Option<(u32, u32)>,
 ) -> Result<String, String> {
+    let (episode_index, episode_total) = match batch {
+        Some((i, t)) => (Some(i), Some(t)),
+        None => (None, None),
+    };
     let input = PathBuf::from(&video_path);
     if !input.is_file() {
         return Err(format!(
@@ -186,6 +191,8 @@ pub async fn extract_audio_for_transcription(
                     .and_then(|n| n.to_str())
                     .unwrap_or("ffmpeg")
             )),
+            episode_index,
+            episode_total,
         },
     );
 
@@ -240,6 +247,8 @@ pub async fn extract_audio_for_transcription(
             stage: "extract".to_string(),
             percent: 100.0,
             message: Some("Audio extraction complete".to_string()),
+            episode_index,
+            episode_total,
         },
     );
 

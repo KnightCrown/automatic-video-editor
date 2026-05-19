@@ -21,8 +21,9 @@ use crate::image::overlay_images;
 use crate::pipeline::jobs::ensure_model_and_run;
 use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
-    load_overlay_images_manifest, load_project, load_transcript,
-    load_transcript_analysis, load_transcript_for_video, project_paths, save_final_video_timeline,
+    load_overlay_images_manifest_for_video, load_project, load_transcript,
+    load_transcript_analysis_for_video, load_transcript_for_video, project_paths,
+    save_final_video_timeline,
     refresh_video_statuses_in_manifest, save_project, save_transcript_analysis,
     set_video_pipeline_status, sync_videos_in_manifest,
 };
@@ -157,12 +158,32 @@ async fn generate_overlay_images(
     app: tauri::AppHandle,
     root_path: String,
     video_id: String,
+    suggestion_ids: Vec<String>,
 ) -> Result<OverlayImagesManifest, String> {
     let manifest = load_project(&root_path)?;
     overlay_images::generate_overlay_images_for_video(
         &app,
         root_path,
         video_id,
+        suggestion_ids,
+        &manifest.settings,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn regenerate_overlay_image(
+    app: tauri::AppHandle,
+    root_path: String,
+    video_id: String,
+    suggestion_id: String,
+) -> Result<OverlayImagesManifest, String> {
+    let manifest = load_project(&root_path)?;
+    overlay_images::regenerate_overlay_image_for_video(
+        &app,
+        root_path,
+        video_id,
+        suggestion_id,
         &manifest.settings,
     )
     .await
@@ -174,7 +195,13 @@ fn get_overlay_images_manifest(
     video_id: String,
 ) -> Result<Option<OverlayImagesManifest>, String> {
     let paths = project_paths(&root_path)?;
-    load_overlay_images_manifest(&paths, &video_id)
+    let video_path = load_project(&root_path)?
+        .videos
+        .into_iter()
+        .find(|v| v.id == video_id)
+        .map(|v| v.path)
+        .unwrap_or_default();
+    load_overlay_images_manifest_for_video(&paths, &video_id, &video_path)
 }
 
 #[tauri::command]
@@ -249,6 +276,7 @@ async fn retry_video_transcription(
         &root_path,
         &video,
         video_id.clone(),
+        Some((1, 1)),
     )
     .await;
 
@@ -329,7 +357,13 @@ fn get_transcript_analysis(
     video_id: String,
 ) -> Result<Option<TranscriptAnalysis>, String> {
     let paths = project_paths(&root_path)?;
-    load_transcript_analysis(&paths, &video_id)
+    let video_path = load_project(&root_path)?
+        .videos
+        .into_iter()
+        .find(|v| v.id == video_id)
+        .map(|v| v.path)
+        .unwrap_or_default();
+    load_transcript_analysis_for_video(&paths, &video_id, &video_path)
 }
 
 #[tauri::command]
@@ -441,6 +475,7 @@ pub fn run() {
             check_xai_api_key_set,
             get_xai_api_key_storage_hint,
             generate_overlay_images,
+            regenerate_overlay_image,
             get_overlay_images_manifest,
             resolve_overlay_image_path,
             read_overlay_image_data_url,

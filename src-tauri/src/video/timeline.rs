@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use chrono::Utc;
 
 use crate::store::project::{
-    load_final_video_timeline, load_overlay_images_manifest, load_transcript_analysis,
+    load_final_video_timeline, load_overlay_images_manifest_for_video,
+    load_project, load_transcript_analysis_for_video,
     project_paths, save_final_video_timeline,
 };
 use crate::types::{
@@ -101,9 +102,15 @@ pub fn build_default_timeline(
     video_id: &str,
 ) -> Result<FinalVideoTimeline, String> {
     let paths = project_paths(root_path)?;
-    let analysis = load_transcript_analysis(&paths, video_id)?
+    let video_path = load_project(root_path)?
+        .videos
+        .into_iter()
+        .find(|v| v.id == video_id)
+        .map(|v| v.path)
+        .unwrap_or_default();
+    let analysis = load_transcript_analysis_for_video(&paths, video_id, &video_path)?
         .ok_or_else(|| "analysis_not_found".to_string())?;
-    let manifest = load_overlay_images_manifest(&paths, video_id)?
+    let manifest = load_overlay_images_manifest_for_video(&paths, video_id, &video_path)?
         .ok_or_else(|| "overlay_images_not_found".to_string())?;
     let clips = build_clips_from_analysis_and_manifest(&analysis, &manifest);
     Ok(FinalVideoTimeline {

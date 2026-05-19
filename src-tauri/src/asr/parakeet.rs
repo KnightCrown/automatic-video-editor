@@ -132,7 +132,12 @@ fn emit_transcribe_progress(
     job_id: &str,
     percent: f64,
     message: &str,
+    batch: Option<(u32, u32)>,
 ) {
+    let (episode_index, episode_total) = match batch {
+        Some((i, t)) => (Some(i), Some(t)),
+        None => (None, None),
+    };
     let _ = app.emit(
         "pipeline_progress",
         PipelineProgress {
@@ -140,6 +145,8 @@ fn emit_transcribe_progress(
             stage: "transcribe".to_string(),
             percent: percent as f32,
             message: Some(message.to_string()),
+            episode_index,
+            episode_total,
         },
     );
 }
@@ -150,6 +157,7 @@ fn transcribe_chunks(
     model: &mut ParakeetTDT,
     audio: Vec<f32>,
     sample_rate: u32,
+    batch: Option<(u32, u32)>,
 ) -> Result<(String, Vec<TranscriptSegment>), String> {
     let chunks = chunk_audio(&audio, sample_rate);
     let chunk_count = chunks.len().max(1);
@@ -167,6 +175,7 @@ fn transcribe_chunks(
             job_id,
             percent,
             &format!("Transcribing chunk {chunk_num} of {chunk_count}…"),
+            batch,
         );
 
         let offset_secs = sample_offset as f64 / sample_rate as f64;
@@ -216,6 +225,7 @@ fn transcribe_chunks(
         job_id,
         TRANSCRIBE_PROGRESS_END,
         "Merging transcript…",
+        batch,
     );
 
     Ok((full_text_parts.join(" "), all_segments))
@@ -228,6 +238,7 @@ pub fn transcribe_wav(
     video_id: &str,
     video_path: &str,
     transcript_timing_offset_ms: i64,
+    batch: Option<(u32, u32)>,
 ) -> Result<Transcript, String> {
     load_transcriber(app)?;
 
@@ -242,9 +253,15 @@ pub fn transcribe_wav(
         .ok_or_else(|| "parakeet_not_loaded".to_string())?;
 
     let (full_text, segments) = if duration_secs > MAX_CHUNK_SECS {
-        transcribe_chunks(app, job_id, model, audio, sample_rate)?
+        transcribe_chunks(app, job_id, model, audio, sample_rate, batch)?
     } else {
-        emit_transcribe_progress(app, job_id, TRANSCRIBE_PROGRESS_START, "Transcribing with Parakeet…");
+        emit_transcribe_progress(
+            app,
+            job_id,
+            TRANSCRIBE_PROGRESS_START,
+            "Transcribing with Parakeet…",
+            batch,
+        );
         let result = model
             .transcribe_samples(
                 audio,

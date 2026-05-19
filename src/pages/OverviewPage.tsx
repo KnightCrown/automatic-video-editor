@@ -12,15 +12,18 @@ import {
   Clock,
 } from "lucide-react";
 import { useProject, getStoredProjectRoot } from "../context/ProjectContext";
+import { usePipelineActivity } from "../context/PipelineActivityContext";
 import {
   getTranscriptionPreflight,
   openProject,
   getProject,
-  runTranscription,
-  retryVideoTranscription,
 } from "../services/pipelineService";
 import { isParakeetModelReady } from "../services/parakeetModelService";
-import type { PipelineProgress, VideoJob } from "../types/pipeline";
+import type { VideoJob } from "../types/pipeline";
+import {
+  transcriptionHeadline,
+  transcriptionOverallPercent,
+} from "../utils/pipelineProgress";
 import {
   errorStageLabel,
   formatTranscriptionError,
@@ -142,10 +145,17 @@ export function OverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("All");
   const [search, setSearch] = useState("");
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState<PipelineProgress | null>(null);
+  const {
+    transcription,
+    isTranscriptionRunning,
+    startBatchTranscription,
+    startSingleTranscription,
+  } = usePipelineActivity();
+  const running = isTranscriptionRunning;
+  const progress = transcription?.progress ?? null;
   const [expandedErrorId, setExpandedErrorId] = useState<string | null>(null);
   const [canTranscribe, setCanTranscribe] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadPreflight = useCallback(async () => {
     try {
@@ -225,38 +235,30 @@ export function OverviewPage() {
   async function handleRunAllReady() {
     if (!project) return;
     setError(null);
-    setRunning(true);
     try {
       await loadPreflight();
       const ready = await isParakeetModelReady();
-      const manifest = await runTranscription(
-        project.rootPath,
-        !ready,
-        (p) => setProgress(p),
-      );
-      setProject(manifest);
+      const manifest = await startBatchTranscription(project.rootPath, !ready);
       const failed = manifest.videos.find((v) => v.status === "failed" && v.error);
       if (failed?.error) setExpandedErrorId(failed.id);
     } catch (err) {
       setError(String(err));
     } finally {
-      setRunning(false);
-      setProgress(null);
       await loadPreflight();
     }
   }
 
   async function handleRetryVideo(videoId: string) {
     if (!project) return;
+    const fileName = project.videos.find((v) => v.id === videoId)?.fileName;
     setError(null);
-    setRunning(true);
-    setProgress(null);
     setExpandedErrorId(videoId);
     try {
-      const manifest = await retryVideoTranscription(project.rootPath, videoId, (p) =>
-        setProgress(p),
+      const manifest = await startSingleTranscription(
+        project.rootPath,
+        videoId,
+        fileName,
       );
-      setProject(manifest);
       const video = manifest.videos.find((v) => v.id === videoId);
       if (video?.status === "failed" && video.error) {
         setError(formatTranscriptionError(video.error));
@@ -264,14 +266,26 @@ export function OverviewPage() {
     } catch (err) {
       setError(String(err));
     } finally {
-      setRunning(false);
-      setProgress(null);
       await loadPreflight();
     }
   }
 
   function openInEditing(videoId: string) {
     navigate("/editing", { state: { videoId } });
+  }
+
+  async function handleRefresh() {
+    if (!project) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await refreshProject();
+      await loadPreflight();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   return (
@@ -301,16 +315,28 @@ export function OverviewPage() {
         </div>
       )}
 
-      {progress && (
+      {transcription && progress && (
         <div className="bg-surface border border-border rounded-xl p-4 mb-6">
-          <p className="text-sm text-white mb-2">
-            <strong>{progress.stage}</strong>
+          <p className="text-sm text-white mb-1 font-medium">
+            {transcriptionHeadline(
+              progress.episodeIndex ?? transcription.episodeIndex ?? 1,
+              progress.episodeTotal ?? transcription.episodeTotal ?? 1,
+            )}
+          </p>
+          <p className="text-sm text-textMuted mb-2">
+            <strong className="text-white">{progress.stage}</strong>
             {progress.message ? ` — ${progress.message}` : ""}
           </p>
           <div className="h-2 bg-background rounded-full overflow-hidden">
             <div
               className="h-full bg-primary transition-all"
-              style={{ width: `${Math.min(100, progress.percent)}%` }}
+              style={{
+                width: `${transcriptionOverallPercent(
+                  progress.episodeIndex ?? transcription.episodeIndex ?? 1,
+                  progress.episodeTotal ?? transcription.episodeTotal ?? 1,
+                  progress,
+                )}%`,
+              }}
             />
           </div>
         </div>
@@ -490,11 +516,12 @@ export function OverviewPage() {
                 <div className="flex gap-3">
                   <button
                     type="button"
-                    disabled={running}
-                    onClick={() => void refreshProject()}
+                    disabled={running || refreshing}
+                    onClick={() => void handleRefresh()}
                     className="text-sm font-medium text-textMuted hover:text-white flex items-center gap-2 disabled:opacity-50"
                   >
-                    <RefreshCw size={14} /> Refresh
+                    <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{" "}
+                    {refreshing ? "Refreshing…" : "Refresh"}
                   </button>
                   <button
                     type="button"
@@ -573,7 +600,7 @@ function VideoRowActions({
           disabled={running}
           title={video.status === "pending" ? "Transcribe" : "Retry"}
           onClick={onRetry}
-          className="p-1.5 text-textMuted hover:text-white rounded disabled:opacity-40"
+          className="p-1.5 text-textMuted hover:text-white bg-transparent hover:bg-white/10 rounded disabled:opacity-40"
         >
           <RefreshCw size={16} />
         </button>
@@ -582,7 +609,7 @@ function VideoRowActions({
           type="button"
           title="Open in Editing"
           onClick={onOpen}
-          className="p-1.5 text-textMuted hover:text-white rounded"
+          className="p-1.5 text-textMuted hover:text-white bg-transparent hover:bg-white/10 rounded"
         >
           <Play size={16} />
         </button>

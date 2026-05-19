@@ -57,13 +57,20 @@ export interface TranscriptAnalysis {
   model: string;
 }
 
+export interface OverlayImageVersion {
+  relativePath: string;
+  generatedAt: string;
+}
+
 export interface GeneratedOverlayImage {
   suggestionId: string;
   title: string;
   imagePrompt: string;
   transcriptExcerpt: string;
+  /** Active version for timeline/export (latest after regenerate). */
   relativePath: string;
   generatedAt: string;
+  versions?: OverlayImageVersion[];
 }
 
 export interface OverlayImagesManifest {
@@ -110,6 +117,9 @@ export interface PipelineProgress {
   stage: string;
   percent: number;
   message?: string;
+  /** 1-based index in the current batch run (e.g. episode 2 of 10). */
+  episodeIndex?: number;
+  episodeTotal?: number;
 }
 
 export type VideoExportMode = "auto" | "software" | "hardware";

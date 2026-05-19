@@ -10,11 +10,11 @@ import {
   Film,
   Check,
   X,
+  Mic,
 } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
+import { usePipelineActivity } from "../context/PipelineActivityContext";
 import {
-  analyzeTranscriptWithOpenai,
-  generateOverlayImages,
   getOverlayImageDisplayUrl,
   getOverlayImagesManifest,
   getTranscript,
@@ -24,70 +24,147 @@ import {
   isXaiApiKeySet,
   openProject,
   prepareFinalVideoTimelineWithSelection,
+  regenerateOverlayImage,
 } from "../services/pipelineService";
+import { isParakeetModelReady } from "../services/parakeetModelService";
 import type {
   ImageGenerationProgress,
   OverlayImagesManifest,
   OverlaySuggestion,
+  PipelineProgress,
   Transcript,
   TranscriptAnalysis,
 } from "../types/pipeline";
+import { formatTranscriptionError } from "../utils/transcriptionErrors";
+import { ImageLightbox, type ImageLightboxPayload } from "../components/ImageLightbox";
+import { sanitizeDownloadFilename } from "../utils/download";
 import {
   displayPipelineStatus,
   excerptSnippet,
   formatIdealDisplayMs,
   formatTimeRangeMs,
+  overlaySuggestionTimeLabel,
   videoHasTranscriptArtifact,
 } from "../utils/format";
+import {
+  overlayImageVersionTiles,
+  overlayImageVersions,
+  type OverlayImageVersionTile,
+} from "../utils/overlayImages";
 
 type TabId = "overlays" | "images" | "transcript";
 
 export function EditingPage() {
-  const { project, setProject, refreshProject } = useProject();
+  const { project, setProject } = useProject();
+  const {
+    isTranscriptionRunning,
+    isAnalyzingVideo,
+    transcriptionForVideo,
+    imageGenerationForVideo,
+    startSingleTranscription,
+    startImageGeneration,
+    startAnalyze,
+  } = usePipelineActivity();
   const location = useLocation();
   const navigate = useNavigate();
   const initialVideoId = (location.state as { videoId?: string } | null)?.videoId;
 
-  const [activeVideoId, setActiveVideoId] = useState<string | null>(initialVideoId ?? null);
+  const [activeVideoPath, setActiveVideoPath] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("overlays");
   const [analysis, setAnalysis] = useState<TranscriptAnalysis | null>(null);
   const [manifest, setManifest] = useState<OverlayImagesManifest | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
-  const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(new Set());
+  const [approvedSuggestionIds, setApprovedSuggestionIds] = useState<Set<string>>(new Set());
   const [checkedSuggestionIds, setCheckedSuggestionIds] = useState<Set<string>>(new Set());
   const [displayUrls, setDisplayUrls] = useState<Record<string, string>>({});
-  const [analyzing, setAnalyzing] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [imageProgress, setImageProgress] = useState<ImageGenerationProgress | null>(null);
   const [creatingVideo, setCreatingVideo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [apiKeySet, setApiKeySet] = useState<boolean | null>(null);
   const [xaiKeySet, setXaiKeySet] = useState<boolean | null>(null);
+  const [lightbox, setLightbox] = useState<ImageLightboxPayload | null>(null);
+  const [regeneratingOverlay, setRegeneratingOverlay] = useState(false);
 
   const activeVideo = useMemo(() => {
-    if (!project) return null;
-    return project.videos.find((v) => v.id === activeVideoId) || project.videos[0] || null;
-  }, [project, activeVideoId]);
+    if (!project?.videos.length || !activeVideoPath) return null;
+    return project.videos.find((v) => v.path === activeVideoPath) ?? null;
+  }, [project?.videos, activeVideoPath]);
+
+  const episodeTranscription = activeVideo
+    ? transcriptionForVideo(activeVideo.id)
+    : null;
+  const episodeImageGeneration = activeVideo
+    ? imageGenerationForVideo(activeVideo.id)
+    : null;
+  const transcribingThisEpisode = Boolean(episodeTranscription);
+  const transcriptionProgress = episodeTranscription?.progress ?? null;
+  const transcribing = transcribingThisEpisode;
+  const transcriptionBusy = isTranscriptionRunning;
+  const analyzing = activeVideo ? isAnalyzingVideo(activeVideo.id) : false;
+  const generating = Boolean(episodeImageGeneration);
+  const imageProgress = episodeImageGeneration?.progress ?? null;
+
+  const handleSelectEpisode = useCallback(
+    (videoId: string) => {
+      const video = project?.videos.find((v) => v.id === videoId);
+      if (video) setActiveVideoPath(video.path);
+    },
+    [project?.videos],
+  );
 
   useEffect(() => {
     isApiKeySet().then(setApiKeySet);
     isXaiApiKeySet().then(setXaiKeySet);
   }, []);
 
+  const videoListKey = useMemo(
+    () => project?.videos.map((v) => `${v.id}:${v.path}`).join("|") ?? "",
+    [project?.videos],
+  );
+
   useEffect(() => {
-    if (!activeVideoId && project?.videos?.length) {
-      setActiveVideoId(initialVideoId ?? project.videos[0].id);
+    if (!project?.videos.length) {
+      setActiveVideoPath(null);
+      return;
     }
-  }, [project, activeVideoId, initialVideoId]);
+
+    setActiveVideoPath((current) => {
+      if (current && project.videos.some((v) => v.path === current)) {
+        return current;
+      }
+
+      if (initialVideoId) {
+        const fromNav = project.videos.find((v) => v.id === initialVideoId);
+        if (fromNav) return fromNav.path;
+      }
+
+      return project.videos[0].path;
+    });
+  }, [videoListKey, initialVideoId]);
+
+  useEffect(() => {
+    if (!initialVideoId) return;
+    navigate(location.pathname, { replace: true, state: null });
+  }, [initialVideoId, location.pathname, navigate]);
+
+  useEffect(() => {
+    setAnalysis(null);
+    setManifest(null);
+    setTranscript(null);
+    setDisplayUrls({});
+    setCheckedSuggestionIds(new Set());
+    setSelectedSuggestionId(null);
+    setApprovedSuggestionIds(new Set());
+  }, [activeVideoPath]);
 
   const reloadEpisodeData = useCallback(async () => {
     if (!project || !activeVideo) return;
+    const video = activeVideo;
     const [a, m, t, timeline] = await Promise.all([
-      getTranscriptAnalysis(project.rootPath, activeVideo.id).catch(() => null),
-      getOverlayImagesManifest(project.rootPath, activeVideo.id).catch(() => null),
-      getTranscript(project.rootPath, activeVideo.id).catch(() => null),
-      getFinalVideoTimeline(project.rootPath, activeVideo.id).catch(() => null),
+      getTranscriptAnalysis(project.rootPath, video.id).catch(() => null),
+      getOverlayImagesManifest(project.rootPath, video.id).catch(() => null),
+      getTranscript(project.rootPath, video.id).catch(() => null),
+      getFinalVideoTimeline(project.rootPath, video.id).catch(() => null),
     ]);
     setAnalysis(a);
     setManifest(m);
@@ -101,15 +178,22 @@ export function EditingPage() {
       setSelectedSuggestionId(null);
     }
     if (timeline?.clips.length) {
-      setSelectedImageIds(new Set(timeline.clips.map((c) => c.suggestionId)));
+      setApprovedSuggestionIds(new Set(timeline.clips.map((c) => c.suggestionId)));
+    } else if (a?.suggestions.length) {
+      setApprovedSuggestionIds(new Set(a.suggestions.map((s) => s.id)));
     } else {
-      setSelectedImageIds(new Set());
+      setApprovedSuggestionIds(new Set());
     }
   }, [project, activeVideo]);
 
   useEffect(() => {
     void reloadEpisodeData();
   }, [reloadEpisodeData]);
+
+  useEffect(() => {
+    if (!project?.updatedAt) return;
+    void reloadEpisodeData();
+  }, [project?.updatedAt, reloadEpisodeData]);
 
   useEffect(() => {
     if (!project?.rootPath || !manifest?.images.length) {
@@ -119,18 +203,28 @@ export function EditingPage() {
     let cancelled = false;
     void (async () => {
       const urls: Record<string, string> = {};
+      const loads: { key: string; relativePath: string }[] = [];
+      for (const img of manifest.images) {
+        for (const version of overlayImageVersions(img)) {
+          loads.push({ key: version.relativePath, relativePath: version.relativePath });
+        }
+      }
       await Promise.all(
-        manifest.images.map(async (img) => {
+        loads.map(async ({ key, relativePath }) => {
           try {
-            urls[img.suggestionId] = await getOverlayImageDisplayUrl(
-              project.rootPath,
-              img.relativePath,
-            );
+            urls[key] = await getOverlayImageDisplayUrl(project.rootPath, relativePath);
           } catch {
             /* skip */
           }
         }),
       );
+      for (const img of manifest.images) {
+        const versions = overlayImageVersions(img);
+        const latest = versions[versions.length - 1];
+        if (latest && urls[latest.relativePath]) {
+          urls[img.suggestionId] = urls[latest.relativePath];
+        }
+      }
       if (!cancelled) setDisplayUrls(urls);
     })();
     return () => {
@@ -143,14 +237,31 @@ export function EditingPage() {
     [analysis, selectedSuggestionId],
   );
 
-  const imagesForSuggestion = useMemo(() => {
-    if (!manifest || !selectedSuggestionId) return [];
-    return manifest.images.filter((img) => img.suggestionId === selectedSuggestionId);
+  const selectedManifestImage = useMemo(() => {
+    if (!manifest || !selectedSuggestionId) return undefined;
+    return manifest.images.find((img) => img.suggestionId === selectedSuggestionId);
   }, [manifest, selectedSuggestionId]);
+
+  const versionTilesForSuggestion = useMemo(
+    () => overlayImageVersionTiles(selectedManifestImage),
+    [selectedManifestImage],
+  );
 
   const generatedSuggestionIds = useMemo(
     () => new Set(manifest?.images.map((i) => i.suggestionId) ?? []),
     [manifest],
+  );
+
+  const approvedNeedingImagesCount = useMemo(
+    () =>
+      [...approvedSuggestionIds].filter((id) => !generatedSuggestionIds.has(id)).length,
+    [approvedSuggestionIds, generatedSuggestionIds],
+  );
+
+  const approvedWithImagesCount = useMemo(
+    () =>
+      [...approvedSuggestionIds].filter((id) => generatedSuggestionIds.has(id)).length,
+    [approvedSuggestionIds, generatedSuggestionIds],
   );
 
   async function handleAddEpisodes() {
@@ -170,63 +281,112 @@ export function EditingPage() {
 
   async function handleAnalyze() {
     if (!project || !activeVideo) return;
-    setAnalyzing(true);
     setError(null);
     const keyReady = await isApiKeySet();
     setApiKeySet(keyReady);
     if (!keyReady) {
       setError("OpenAI API key is not set. Save your key in Settings first.");
-      setAnalyzing(false);
       return;
     }
     try {
-      const result = await analyzeTranscriptWithOpenai(project.rootPath, activeVideo.id);
-      setAnalysis(result);
-      if (result.suggestions.length) setSelectedSuggestionId(result.suggestions[0].id);
-      await refreshProject();
+      const result = await startAnalyze(
+        project.rootPath,
+        activeVideo.id,
+        activeVideo.fileName,
+      );
+      if (activeVideoPath === activeVideo.path) {
+        setAnalysis(result);
+        setApprovedSuggestionIds(new Set(result.suggestions.map((s) => s.id)));
+        if (result.suggestions.length) setSelectedSuggestionId(result.suggestions[0].id);
+      }
     } catch (err) {
       setError(String(err));
-    } finally {
-      setAnalyzing(false);
     }
   }
 
   async function handleGenerateImages() {
     if (!project || !activeVideo) return;
-    setGenerating(true);
+    const toGenerate = [...approvedSuggestionIds].filter(
+      (id) => !generatedSuggestionIds.has(id),
+    );
+    if (toGenerate.length === 0) {
+      setError(
+        approvedSuggestionIds.size === 0
+          ? "Approve at least one overlay on the Overlays tab before generating images."
+          : "All approved overlays already have images.",
+      );
+      return;
+    }
     setError(null);
-    setImageProgress(null);
     const keyOk = await isXaiApiKeySet();
     setXaiKeySet(keyOk);
     if (!keyOk) {
       setError("xAI API key is not set. Save your key in Settings first.");
-      setGenerating(false);
       return;
     }
+    const videoPath = activeVideo.path;
     try {
-      const m = await generateOverlayImages(project.rootPath, activeVideo.id, (p) =>
-        setImageProgress(p),
+      const m = await startImageGeneration(
+        project.rootPath,
+        activeVideo.id,
+        toGenerate,
+        activeVideo.fileName,
       );
-      setManifest(m);
-      setSelectedImageIds(new Set(m.images.map((img) => img.suggestionId)));
-      setCheckedSuggestionIds(new Set());
-      await refreshProject();
+      if (activeVideoPath === videoPath) {
+        setManifest(m);
+        setApprovedSuggestionIds((prev) => {
+          const next = new Set(prev);
+          for (const img of m.images) next.add(img.suggestionId);
+          return next;
+        });
+        setCheckedSuggestionIds(new Set());
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleRegenerateImage() {
+    if (!project || !activeVideo || !selectedSuggestionId) return;
+    setError(null);
+    const keyOk = await isXaiApiKeySet();
+    setXaiKeySet(keyOk);
+    if (!keyOk) {
+      setError("xAI API key is not set. Save your key in Settings first.");
+      return;
+    }
+    const videoPath = activeVideo.path;
+    setRegeneratingOverlay(true);
+    try {
+      const m = await regenerateOverlayImage(
+        project.rootPath,
+        activeVideo.id,
+        selectedSuggestionId,
+      );
+      if (activeVideoPath === videoPath) {
+        setManifest(m);
+        setApprovedSuggestionIds((prev) => {
+          const next = new Set(prev);
+          next.add(selectedSuggestionId);
+          return next;
+        });
+      }
     } catch (err) {
       setError(String(err));
     } finally {
-      setGenerating(false);
-      setImageProgress(null);
+      setRegeneratingOverlay(false);
     }
   }
 
   async function handleCreateVideo() {
-    if (!project || !activeVideo || selectedImageIds.size === 0) return;
+    const clipIds = [...approvedSuggestionIds].filter((id) =>
+      generatedSuggestionIds.has(id),
+    );
+    if (!project || !activeVideo || clipIds.length === 0) return;
     setCreatingVideo(true);
     setError(null);
     try {
-      await prepareFinalVideoTimelineWithSelection(project.rootPath, activeVideo.id, [
-        ...selectedImageIds,
-      ]);
+      await prepareFinalVideoTimelineWithSelection(project.rootPath, activeVideo.id, clipIds);
       navigate("/final-video", { state: { createdVideoIds: [activeVideo.id] } });
     } catch (err) {
       setError(String(err));
@@ -235,8 +395,8 @@ export function EditingPage() {
     }
   }
 
-  function toggleImage(suggestionId: string) {
-    setSelectedImageIds((prev) => {
+  function toggleImageApproval(suggestionId: string) {
+    setApprovedSuggestionIds((prev) => {
       const next = new Set(prev);
       if (next.has(suggestionId)) next.delete(suggestionId);
       else next.add(suggestionId);
@@ -254,21 +414,88 @@ export function EditingPage() {
   }
 
   function approveCheckedSuggestions() {
-    const withImages = generatedSuggestionIds;
-    setSelectedImageIds((prev) => {
+    setApprovedSuggestionIds((prev) => {
       const next = new Set(prev);
-      for (const id of checkedSuggestionIds) {
-        if (withImages.has(id)) next.add(id);
-      }
+      for (const id of checkedSuggestionIds) next.add(id);
       return next;
     });
   }
 
   function declineCheckedSuggestions() {
-    setSelectedImageIds((prev) => {
+    setApprovedSuggestionIds((prev) => {
       const next = new Set(prev);
       for (const id of checkedSuggestionIds) next.delete(id);
       return next;
+    });
+  }
+
+  function toggleSuggestionApproval(suggestionId: string) {
+    setApprovedSuggestionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(suggestionId)) next.delete(suggestionId);
+      else next.add(suggestionId);
+      return next;
+    });
+  }
+
+  async function handleTranscribe() {
+    if (!project || !activeVideo) return;
+    setError(null);
+    const videoPath = activeVideo.path;
+    try {
+      const ready = await isParakeetModelReady();
+      if (!ready) {
+        setError(
+          "Parakeet speech model is not ready. Open Settings to download it, then try again.",
+        );
+        return;
+      }
+      const manifest = await startSingleTranscription(
+        project.rootPath,
+        activeVideo.id,
+        activeVideo.fileName,
+      );
+      if (activeVideoPath === videoPath) {
+        await reloadEpisodeData();
+      }
+      const video = manifest.videos.find((v) => v.path === videoPath);
+      if (video?.status === "failed" && video.error) {
+        setError(formatTranscriptionError(video.error));
+      }
+    } catch (err) {
+      setError(formatTranscriptionError(String(err)));
+    }
+  }
+
+  function editingDownloadFilename(title: string, suggestionId: string): string | undefined {
+    if (!activeVideo) return undefined;
+    const base = `${sanitizeDownloadFilename(title)}-${suggestionId.slice(0, 8)}.png`;
+    return `${activeVideo.id}-${base}`;
+  }
+
+  function openSuggestionLightbox(suggestion: OverlaySuggestion, imageUrl?: string) {
+    if (!imageUrl) return;
+    setLightbox({
+      imageUrl,
+      title: suggestion.title,
+      excerpt: suggestion.transcriptExcerpt,
+      timeLabel: overlaySuggestionTimeLabel(suggestion),
+      downloadFilename: editingDownloadFilename(suggestion.title, suggestion.id),
+    });
+  }
+
+  function openImageLightbox(
+    img: { suggestionId: string; title: string; transcriptExcerpt: string },
+    imageUrl?: string,
+  ) {
+    if (!imageUrl) return;
+    const suggestion = analysis?.suggestions.find((s) => s.id === img.suggestionId);
+    setLightbox({
+      imageUrl,
+      title: img.title,
+      excerpt: img.transcriptExcerpt,
+      timeLabel: suggestion ? overlaySuggestionTimeLabel(suggestion) : undefined,
+      downloadFilename: editingDownloadFilename(img.title, img.suggestionId),
     });
   }
 
@@ -297,12 +524,12 @@ export function EditingPage() {
         <div className="flex gap-2 flex-shrink-0">
           <button
             type="button"
-            disabled={creatingVideo || selectedImageIds.size === 0 || !activeVideo}
+            disabled={creatingVideo || approvedWithImagesCount === 0 || !activeVideo}
             onClick={() => void handleCreateVideo()}
             className="bg-[#8B5CF6] hover:bg-[#7C3AED] text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
           >
             <Film size={16} />
-            {creatingVideo ? "Creating…" : `Create video (${selectedImageIds.size})`}
+            {creatingVideo ? "Creating…" : `Create video (${approvedWithImagesCount})`}
           </button>
           <button
             type="button"
@@ -330,8 +557,8 @@ export function EditingPage() {
       <div className="flex-1 flex gap-6 overflow-x-auto overflow-y-hidden min-h-0 min-w-0">
         <EpisodeListPanel
           videos={project.videos}
-          activeVideoId={activeVideo?.id ?? null}
-          onSelect={setActiveVideoId}
+          activeVideoPath={activeVideoPath}
+          onSelect={handleSelectEpisode}
           onAddEpisodes={() => void handleAddEpisodes()}
         />
 
@@ -365,37 +592,56 @@ export function EditingPage() {
                 {activeTab === "overlays" && (
                   <OverlaysTabContent
                     hasTranscript={hasTranscript}
+                    transcribing={transcribing}
+                    transcriptionBusy={transcriptionBusy}
+                    transcriptionProgress={transcriptionProgress}
                     analyzing={analyzing}
                     hasAnalysis={hasAnalysis}
                     analysis={analysis}
                     generatedSuggestionIds={generatedSuggestionIds}
                     displayUrls={displayUrls}
                     selectedSuggestionId={selectedSuggestionId}
-                    selectedImageIds={selectedImageIds}
+                    approvedSuggestionIds={approvedSuggestionIds}
                     checkedSuggestionIds={checkedSuggestionIds}
+                    onTranscribe={() => void handleTranscribe()}
                     onAnalyze={() => void handleAnalyze()}
                     onSelectSuggestion={setSelectedSuggestionId}
                     onToggleChecked={toggleCheckedSuggestion}
                     onApproveChecked={approveCheckedSuggestions}
                     onDeclineChecked={declineCheckedSuggestions}
+                    onToggleApproval={toggleSuggestionApproval}
+                    onOpenLightbox={openSuggestionLightbox}
                   />
                 )}
                 {activeTab === "images" && (
                   <ImagesTabContent
                     hasTranscript={hasTranscript}
+                    transcribing={transcribing}
+                    transcriptionBusy={transcriptionBusy}
+                    transcriptionProgress={transcriptionProgress}
                     hasAnalysis={hasAnalysis}
                     generating={generating}
                     imageProgress={imageProgress}
                     manifest={manifest}
                     displayUrls={displayUrls}
-                    selectedImageIds={selectedImageIds}
+                    approvedSuggestionIds={approvedSuggestionIds}
+                    approvedNeedingImagesCount={approvedNeedingImagesCount}
+                    onTranscribe={() => void handleTranscribe()}
                     onGenerate={() => void handleGenerateImages()}
-                    onToggleImage={toggleImage}
+                    onToggleImage={toggleImageApproval}
                     onSelectImage={setSelectedSuggestionId}
+                    onOpenLightbox={openImageLightbox}
                   />
                 )}
                 {activeTab === "transcript" && (
-                  <TranscriptTabContent transcript={transcript} hasTranscript={hasTranscript} />
+                  <TranscriptTabContent
+                    transcript={transcript}
+                    hasTranscript={hasTranscript}
+                    transcribing={transcribing}
+                    transcriptionBusy={transcriptionBusy}
+                    transcriptionProgress={transcriptionProgress}
+                    onTranscribe={() => void handleTranscribe()}
+                  />
                 )}
               </div>
             </>
@@ -408,14 +654,17 @@ export function EditingPage() {
 
         <PromptPanel
           suggestion={selectedSuggestion}
-          imagesForSuggestion={imagesForSuggestion}
+          versionTiles={versionTilesForSuggestion}
           displayUrls={displayUrls}
           videoId={activeVideo?.id ?? ""}
-          onGenerateImages={() => void handleGenerateImages()}
-          generating={generating}
+          onRegenerateImage={() => void handleRegenerateImage()}
+          regenerating={regeneratingOverlay || generating}
           hasAnalysis={hasAnalysis}
+          onOpenLightbox={(img, url) => openImageLightbox(img, url)}
         />
       </div>
+
+      <ImageLightbox payload={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
 }
@@ -479,18 +728,18 @@ function TabButton({
 
 function EpisodeListPanel({
   videos,
-  activeVideoId,
+  activeVideoPath,
   onSelect,
   onAddEpisodes,
 }: {
-  videos: { id: string; fileName: string; status: string }[];
-  activeVideoId: string | null;
+  videos: { id: string; path: string; fileName: string; status: string }[];
+  activeVideoPath: string | null;
   onSelect: (id: string) => void;
   onAddEpisodes: () => void;
 }) {
   return (
-    <div className="w-64 flex flex-col bg-surface border border-border rounded-xl overflow-hidden flex-shrink-0">
-      <div className="p-4 border-b border-border flex justify-between items-center bg-[#151821]">
+    <div className="relative z-20 w-64 min-h-0 self-stretch flex flex-col bg-surface border border-border rounded-xl overflow-hidden flex-shrink-0">
+      <div className="p-4 border-b border-border flex justify-between items-center bg-[#151821] flex-shrink-0">
         <h3 className="text-sm font-semibold text-white">Episodes ({videos.length})</h3>
         <button
           type="button"
@@ -500,21 +749,25 @@ function EpisodeListPanel({
           <Plus size={14} /> Add episodes
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
         {videos.map((video) => (
           <button
             key={video.id}
             type="button"
-            onClick={() => onSelect(video.id)}
-            className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between ${
-              activeVideoId === video.id
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSelect(video.id);
+            }}
+            className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between cursor-pointer ${
+              activeVideoPath === video.path
                 ? "bg-[#3B82F6] bg-opacity-10 border-[#3B82F6] border-opacity-50"
                 : "bg-background border-border hover:border-gray-600"
             }`}
           >
             <p
               className={`text-sm font-medium truncate ${
-                activeVideoId === video.id ? "text-white" : "text-textMain"
+                activeVideoPath === video.path ? "text-white" : "text-textMain"
               }`}
             >
               {video.fileName}
@@ -536,48 +789,104 @@ function overlayRowStatus(
   hasImage: boolean,
   approvedIds: Set<string>,
 ): OverlayRowStatus {
-  if (!hasImage) return "pending";
   if (approvedIds.has(suggestionId)) return "approved";
-  return "generated";
+  return hasImage ? "generated" : "pending";
+}
+
+function EpisodeTranscribeBar({
+  transcribing,
+  transcriptionBusy,
+  progress,
+  onTranscribe,
+}: {
+  transcribing: boolean;
+  transcriptionBusy: boolean;
+  progress: PipelineProgress | null;
+  onTranscribe: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 flex-shrink-0">
+      <button
+        type="button"
+        disabled={transcriptionBusy}
+        onClick={onTranscribe}
+        className="self-start flex items-center gap-2 bg-[#3B82F6] hover:bg-[#2563EB] text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+      >
+        <Mic size={16} />
+        {transcribing ? "Transcribing…" : "Transcribe"}
+      </button>
+      {transcriptionBusy && !transcribing && (
+        <p className="text-sm text-textMuted">
+          Another transcription is running — see the progress bar at the top.
+        </p>
+      )}
+      {transcribing && progress && (
+        <p className="text-sm text-textMuted">
+          <strong className="text-white">{progress.stage}</strong>
+          {progress.message ? ` — ${progress.message}` : ""}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function OverlaysTabContent({
   hasTranscript,
+  transcribing,
+  transcriptionBusy,
+  transcriptionProgress,
   analyzing,
   hasAnalysis,
   analysis,
   generatedSuggestionIds,
   displayUrls,
   selectedSuggestionId,
-  selectedImageIds,
+  approvedSuggestionIds,
   checkedSuggestionIds,
+  onTranscribe,
   onAnalyze,
   onSelectSuggestion,
   onToggleChecked,
   onApproveChecked,
   onDeclineChecked,
+  onToggleApproval,
+  onOpenLightbox,
 }: {
   hasTranscript: boolean;
+  transcribing: boolean;
+  transcriptionBusy: boolean;
+  transcriptionProgress: PipelineProgress | null;
   analyzing: boolean;
   hasAnalysis: boolean;
   analysis: TranscriptAnalysis | null;
   generatedSuggestionIds: Set<string>;
   displayUrls: Record<string, string>;
   selectedSuggestionId: string | null;
-  selectedImageIds: Set<string>;
+  approvedSuggestionIds: Set<string>;
   checkedSuggestionIds: Set<string>;
+  onTranscribe: () => void;
   onAnalyze: () => void;
   onSelectSuggestion: (id: string) => void;
   onToggleChecked: (id: string) => void;
   onApproveChecked: () => void;
   onDeclineChecked: () => void;
+  onToggleApproval: (id: string) => void;
+  onOpenLightbox: (suggestion: OverlaySuggestion, imageUrl?: string) => void;
 }) {
   if (!hasTranscript) {
     return (
-      <TabEmptyState
-        title="Transcribe this episode to get started."
-        hint="Go to Overview and run transcription for this video. Overlay suggestions appear after analysis."
-      />
+      <div className="flex flex-col gap-4 flex-1 min-h-0">
+        <EpisodeTranscribeBar
+          transcribing={transcribing}
+          transcriptionBusy={transcriptionBusy}
+          progress={transcriptionProgress}
+          onTranscribe={onTranscribe}
+        />
+        <TabEmptyState
+          title="Transcribe this episode to get started."
+          hint='Click "Transcribe" above, then analyze the transcript to create overlay suggestions.'
+        />
+      </div>
     );
   }
 
@@ -602,12 +911,14 @@ function OverlaysTabContent({
           generatedSuggestionIds={generatedSuggestionIds}
           displayUrls={displayUrls}
           selectedSuggestionId={selectedSuggestionId}
-          selectedImageIds={selectedImageIds}
+          approvedSuggestionIds={approvedSuggestionIds}
           checkedSuggestionIds={checkedSuggestionIds}
           onSelectSuggestion={onSelectSuggestion}
           onToggleChecked={onToggleChecked}
           onApproveChecked={onApproveChecked}
           onDeclineChecked={onDeclineChecked}
+          onToggleApproval={onToggleApproval}
+          onOpenLightbox={onOpenLightbox}
         />
       )}
 
@@ -626,23 +937,27 @@ function OverlaySuggestionsTable({
   generatedSuggestionIds,
   displayUrls,
   selectedSuggestionId,
-  selectedImageIds,
+  approvedSuggestionIds,
   checkedSuggestionIds,
   onSelectSuggestion,
   onToggleChecked,
   onApproveChecked,
   onDeclineChecked,
+  onToggleApproval,
+  onOpenLightbox,
 }: {
   analysis: TranscriptAnalysis;
   generatedSuggestionIds: Set<string>;
   displayUrls: Record<string, string>;
   selectedSuggestionId: string | null;
-  selectedImageIds: Set<string>;
+  approvedSuggestionIds: Set<string>;
   checkedSuggestionIds: Set<string>;
   onSelectSuggestion: (id: string) => void;
   onToggleChecked: (id: string) => void;
   onApproveChecked: () => void;
   onDeclineChecked: () => void;
+  onToggleApproval: (id: string) => void;
+  onOpenLightbox: (suggestion: OverlaySuggestion, imageUrl?: string) => void;
 }) {
   const stats = useMemo(() => {
     let approved = 0;
@@ -650,29 +965,23 @@ function OverlaySuggestionsTable({
     let pending = 0;
     for (const s of analysis.suggestions) {
       const hasImage = generatedSuggestionIds.has(s.id);
-      const status = overlayRowStatus(s.id, hasImage, selectedImageIds);
+      const status = overlayRowStatus(s.id, hasImage, approvedSuggestionIds);
       if (status === "approved") approved += 1;
       else if (status === "generated") generated += 1;
       else pending += 1;
     }
     return { approved, generated, pending };
-  }, [analysis.suggestions, generatedSuggestionIds, selectedImageIds]);
+  }, [analysis.suggestions, generatedSuggestionIds, approvedSuggestionIds]);
 
-  const checkedWithImages = useMemo(() => {
-    let n = 0;
-    for (const id of checkedSuggestionIds) {
-      if (generatedSuggestionIds.has(id)) n += 1;
-    }
-    return n;
-  }, [checkedSuggestionIds, generatedSuggestionIds]);
+  const checkedCount = checkedSuggestionIds.size;
 
   const checkedApproved = useMemo(() => {
     let n = 0;
     for (const id of checkedSuggestionIds) {
-      if (selectedImageIds.has(id)) n += 1;
+      if (approvedSuggestionIds.has(id)) n += 1;
     }
     return n;
-  }, [checkedSuggestionIds, selectedImageIds]);
+  }, [checkedSuggestionIds, approvedSuggestionIds]);
 
   return (
     <div className="rounded-xl border border-border bg-surface overflow-hidden flex-1 min-h-0 flex flex-col">
@@ -695,10 +1004,12 @@ function OverlaySuggestionsTable({
                 highlight={selectedSuggestionId === s.id}
                 hasImage={generatedSuggestionIds.has(s.id)}
                 displayUrl={displayUrls[s.id]}
-                status={overlayRowStatus(s.id, generatedSuggestionIds.has(s.id), selectedImageIds)}
+                status={overlayRowStatus(s.id, generatedSuggestionIds.has(s.id), approvedSuggestionIds)}
                 checked={checkedSuggestionIds.has(s.id)}
                 onToggleChecked={() => onToggleChecked(s.id)}
                 onSelect={() => onSelectSuggestion(s.id)}
+                onToggleApproval={() => onToggleApproval(s.id)}
+                onOpenLightbox={(url) => onOpenLightbox(s, url)}
               />
             ))}
           </tbody>
@@ -707,7 +1018,7 @@ function OverlaySuggestionsTable({
       <OverlaySuggestionsFooter
         total={analysis.suggestions.length}
         stats={stats}
-        checkedWithImages={checkedWithImages}
+        checkedCount={checkedCount}
         checkedApproved={checkedApproved}
         onApproveChecked={onApproveChecked}
         onDeclineChecked={onDeclineChecked}
@@ -719,14 +1030,14 @@ function OverlaySuggestionsTable({
 function OverlaySuggestionsFooter({
   total,
   stats,
-  checkedWithImages,
+  checkedCount,
   checkedApproved,
   onApproveChecked,
   onDeclineChecked,
 }: {
   total: number;
   stats: { approved: number; generated: number; pending: number };
-  checkedWithImages: number;
+  checkedCount: number;
   checkedApproved: number;
   onApproveChecked: () => void;
   onDeclineChecked: () => void;
@@ -734,18 +1045,18 @@ function OverlaySuggestionsFooter({
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-border bg-[#151821] flex-shrink-0">
       <p className="text-xs text-textMuted">
-        {total} suggestions · {stats.approved} approved · {stats.generated} generated ·{" "}
-        {stats.pending} pending
+        {total} suggestions · {stats.approved} approved for images · {stats.generated} with image
+        (excluded) · {stats.pending} excluded
       </p>
       <div className="flex gap-2">
         <button
           type="button"
-          disabled={checkedWithImages === 0}
+          disabled={checkedCount === 0}
           onClick={onApproveChecked}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-success bg-opacity-20 text-success border border-success border-opacity-30 hover:bg-opacity-30 disabled:opacity-40"
         >
           <Check size={14} />
-          Approve selected ({checkedWithImages})
+          Approve selected ({checkedCount})
         </button>
         <button
           type="button"
@@ -761,23 +1072,48 @@ function OverlaySuggestionsFooter({
   );
 }
 
-function OverlayStatusBadge({ status }: { status: OverlayRowStatus }) {
+function OverlayStatusBadge({
+  status,
+  onToggle,
+}: {
+  status: OverlayRowStatus;
+  onToggle?: () => void;
+}) {
   const styles: Record<OverlayRowStatus, string> = {
     pending: "bg-white bg-opacity-5 text-textMuted border-border",
     generated: "bg-[#3B82F6] bg-opacity-10 text-[#3B82F6] border-[#3B82F6] border-opacity-30",
     approved: "bg-success bg-opacity-20 text-success border-success border-opacity-30",
   };
   const labels: Record<OverlayRowStatus, string> = {
-    pending: "Pending",
-    generated: "Generated",
+    pending: "Excluded",
+    generated: "Excluded",
     approved: "Approved",
   };
+  const titles: Record<OverlayRowStatus, string | undefined> = {
+    pending: "Click to approve for image generation",
+    generated: "Click to approve for final video",
+    approved: "Click to exclude",
+  };
+  const className = `text-xs px-2 py-1 rounded border capitalize ${styles[status]}${
+    onToggle ? " cursor-pointer hover:opacity-80" : ""
+  }`;
+
+  if (!onToggle) {
+    return <span className={className}>{labels[status]}</span>;
+  }
+
   return (
-    <span
-      className={`text-xs px-2 py-1 rounded border capitalize ${styles[status]}`}
+    <button
+      type="button"
+      title={titles[status]}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      className={className}
     >
       {labels[status]}
-    </span>
+    </button>
   );
 }
 
@@ -790,6 +1126,8 @@ function SuggestionRow({
   checked,
   onToggleChecked,
   onSelect,
+  onToggleApproval,
+  onOpenLightbox,
 }: {
   suggestion: OverlaySuggestion;
   highlight: boolean;
@@ -799,6 +1137,8 @@ function SuggestionRow({
   checked: boolean;
   onToggleChecked: () => void;
   onSelect: () => void;
+  onToggleApproval: () => void;
+  onOpenLightbox: (imageUrl?: string) => void;
 }) {
   return (
     <tr
@@ -829,7 +1169,13 @@ function SuggestionRow({
         </p>
       </td>
       <td className="p-3 align-top" onClick={(e) => e.stopPropagation()}>
-        <div className="w-28 aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border">
+        <button
+          type="button"
+          disabled={!displayUrl}
+          title={displayUrl ? "View image" : undefined}
+          onClick={() => onOpenLightbox(displayUrl)}
+          className="w-28 aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow"
+        >
           {displayUrl ? (
             <img
               src={displayUrl}
@@ -841,10 +1187,10 @@ function SuggestionRow({
           ) : (
             <ImageIcon className="text-border" size={20} />
           )}
-        </div>
+        </button>
       </td>
-      <td className="p-3">
-        <OverlayStatusBadge status={status} />
+      <td className="p-3" onClick={(e) => e.stopPropagation()}>
+        <OverlayStatusBadge status={status} onToggle={onToggleApproval} />
       </td>
     </tr>
   );
@@ -852,33 +1198,56 @@ function SuggestionRow({
 
 function ImagesTabContent({
   hasTranscript,
+  transcribing,
+  transcriptionBusy,
+  transcriptionProgress,
   hasAnalysis,
   generating,
   imageProgress,
   manifest,
   displayUrls,
-  selectedImageIds,
+  approvedSuggestionIds,
+  approvedNeedingImagesCount,
+  onTranscribe,
   onGenerate,
   onToggleImage,
   onSelectImage,
+  onOpenLightbox,
 }: {
   hasTranscript: boolean;
+  transcribing: boolean;
+  transcriptionBusy: boolean;
+  transcriptionProgress: PipelineProgress | null;
   hasAnalysis: boolean;
   generating: boolean;
   imageProgress: ImageGenerationProgress | null;
   manifest: OverlayImagesManifest | null;
   displayUrls: Record<string, string>;
-  selectedImageIds: Set<string>;
+  approvedSuggestionIds: Set<string>;
+  approvedNeedingImagesCount: number;
+  onTranscribe: () => void;
   onGenerate: () => void;
   onToggleImage: (id: string) => void;
   onSelectImage: (id: string) => void;
+  onOpenLightbox: (
+    img: { suggestionId: string; title: string; transcriptExcerpt: string },
+    imageUrl?: string,
+  ) => void;
 }) {
   if (!hasTranscript) {
     return (
-      <TabEmptyState
-        title="Transcribe this episode to get started."
-        hint="Image generation is available after transcription and overlay analysis on the Overlays tab."
-      />
+      <div className="flex flex-col gap-4 flex-1 min-h-0">
+        <EpisodeTranscribeBar
+          transcribing={transcribing}
+          transcriptionBusy={transcriptionBusy}
+          progress={transcriptionProgress}
+          onTranscribe={onTranscribe}
+        />
+        <TabEmptyState
+          title="Transcribe this episode to get started."
+          hint='After transcription, analyze overlays on the Overlays tab, then return here to generate images.'
+        />
+      </div>
     );
   }
 
@@ -898,10 +1267,12 @@ function ImagesTabContent({
         imageProgress={imageProgress}
         manifest={manifest}
         displayUrls={displayUrls}
-        selectedImageIds={selectedImageIds}
+        approvedSuggestionIds={approvedSuggestionIds}
+        approvedNeedingImagesCount={approvedNeedingImagesCount}
         onGenerate={onGenerate}
         onToggleImage={onToggleImage}
         onSelectImage={onSelectImage}
+        onOpenLightbox={onOpenLightbox}
       />
     </div>
   );
@@ -912,32 +1283,47 @@ function ImagesTabBody(props: {
   imageProgress: ImageGenerationProgress | null;
   manifest: OverlayImagesManifest | null;
   displayUrls: Record<string, string>;
-  selectedImageIds: Set<string>;
+  approvedSuggestionIds: Set<string>;
+  approvedNeedingImagesCount: number;
   onGenerate: () => void;
   onToggleImage: (id: string) => void;
   onSelectImage: (id: string) => void;
+  onOpenLightbox: (
+    img: { suggestionId: string; title: string; transcriptExcerpt: string },
+    imageUrl?: string,
+  ) => void;
 }) {
   const {
     generating,
     imageProgress,
     manifest,
     displayUrls,
-    selectedImageIds,
+    approvedSuggestionIds,
+    approvedNeedingImagesCount,
     onGenerate,
     onToggleImage,
     onSelectImage,
+    onOpenLightbox,
   } = props;
 
   return (
     <div className="flex flex-col gap-4 flex-1 min-h-0">
       <button
         type="button"
-        disabled={generating}
+        disabled={generating || approvedNeedingImagesCount === 0}
         onClick={onGenerate}
         className="self-start flex-shrink-0 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
       >
-        {generating ? "Generating images…" : "Generate images (Grok Imagine)"}
+        {generating
+          ? "Generating images…"
+          : `Generate images (${approvedNeedingImagesCount} approved)`}
       </button>
+      {approvedSuggestionIds.size > 0 && approvedNeedingImagesCount === 0 && !generating && (
+        <p className="text-xs text-textMuted flex-shrink-0">
+          All approved overlays already have images. Exclude overlays on the Overlays tab to skip
+          them, or approve more suggestions.
+        </p>
+      )}
 
       {generating && imageProgress && (
         <div className="text-sm text-textMuted flex-shrink-0">
@@ -949,15 +1335,18 @@ function ImagesTabBody(props: {
 
       {manifest && manifest.images.length > 0 ? (
         <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-2">
           {manifest.images.map((img) => (
             <ImageSelectCard
               key={img.suggestionId}
               img={img}
               displayUrl={displayUrls[img.suggestionId]}
-              selected={selectedImageIds.has(img.suggestionId)}
+              selected={approvedSuggestionIds.has(img.suggestionId)}
               onToggle={() => onToggleImage(img.suggestionId)}
               onSelect={() => onSelectImage(img.suggestionId)}
+              onOpenLightbox={() =>
+                onOpenLightbox(img, displayUrls[img.suggestionId])
+              }
             />
           ))}
           </div>
@@ -965,7 +1354,7 @@ function ImagesTabBody(props: {
       ) : !generating ? (
         <TabEmptyState
           title="No images generated yet."
-          hint='Click "Generate images (Grok Imagine)" above to render images from your overlay suggestions.'
+          hint='Approve overlays on the Overlays tab, then click "Generate images" above. All overlays are approved by default after analysis.'
         />
       ) : null}
     </div>
@@ -978,12 +1367,14 @@ function ImageSelectCard({
   selected,
   onToggle,
   onSelect,
+  onOpenLightbox,
 }: {
   img: { suggestionId: string; title: string; transcriptExcerpt: string };
   displayUrl?: string;
   selected: boolean;
   onToggle: () => void;
   onSelect: () => void;
+  onOpenLightbox: () => void;
 }) {
   return (
     <div
@@ -1010,13 +1401,22 @@ function ImageSelectCard({
         />
         <p className="text-sm font-medium text-white flex-1 min-w-0">{img.title}</p>
       </div>
-      <div className="aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border">
+      <button
+        type="button"
+        disabled={!displayUrl}
+        title={displayUrl ? "View image" : undefined}
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenLightbox();
+        }}
+        className="w-full aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow"
+      >
         {displayUrl ? (
           <img src={displayUrl} alt={img.title} className="w-full h-full object-cover" />
         ) : (
           <ImageIcon className="text-border" size={32} />
         )}
-      </div>
+      </button>
       <p
         className="text-xs text-textMuted mt-2 leading-relaxed line-clamp-4"
         title={img.transcriptExcerpt}
@@ -1030,16 +1430,32 @@ function ImageSelectCard({
 function TranscriptTabContent({
   transcript,
   hasTranscript,
+  transcribing,
+  transcriptionBusy,
+  transcriptionProgress,
+  onTranscribe,
 }: {
   transcript: Transcript | null;
   hasTranscript: boolean;
+  transcribing: boolean;
+  transcriptionBusy: boolean;
+  transcriptionProgress: PipelineProgress | null;
+  onTranscribe: () => void;
 }) {
   if (!hasTranscript) {
     return (
-      <TabEmptyState
-        title="Transcribe this episode to get started."
-        hint="The full transcript will appear here after you run transcription from Overview."
-      />
+      <div className="flex flex-col gap-4 flex-1 min-h-0">
+        <EpisodeTranscribeBar
+          transcribing={transcribing}
+          transcriptionBusy={transcriptionBusy}
+          progress={transcriptionProgress}
+          onTranscribe={onTranscribe}
+        />
+        <TabEmptyState
+          title="Transcribe this episode to get started."
+          hint='Click "Transcribe" above. The full transcript will appear here when finished.'
+        />
+      </div>
     );
   }
   if (!transcript) {
@@ -1079,21 +1495,27 @@ function TranscriptSegmentList({ transcript }: { transcript: Transcript }) {
 
 function PromptPanel({
   suggestion,
-  imagesForSuggestion,
+  versionTiles,
   displayUrls,
   videoId,
-  onGenerateImages,
-  generating,
+  onRegenerateImage,
+  regenerating,
   hasAnalysis,
+  onOpenLightbox,
 }: {
   suggestion: OverlaySuggestion | null;
-  imagesForSuggestion: { suggestionId: string; title: string; relativePath: string }[];
+  versionTiles: OverlayImageVersionTile[];
   displayUrls: Record<string, string>;
   videoId: string;
-  onGenerateImages: () => void;
-  generating: boolean;
+  onRegenerateImage: () => void;
+  regenerating: boolean;
   hasAnalysis: boolean;
+  onOpenLightbox: (
+    img: { suggestionId: string; title: string; transcriptExcerpt: string },
+    imageUrl?: string,
+  ) => void;
 }) {
+  const hasImages = versionTiles.length > 0;
   return (
     <div className="w-[260px] lg:w-[280px] xl:w-[300px] min-w-[240px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto">
       <div className="bg-surface border border-border rounded-xl flex flex-col overflow-hidden">
@@ -1114,23 +1536,41 @@ function PromptPanel({
                 </>
               )}
               <h3 className="text-white text-sm font-medium mb-3">Images for this overlay</h3>
-              {imagesForSuggestion.length === 0 ? (
+              {versionTiles.length === 0 ? (
                 <p className="text-xs text-textMuted mb-4">Not generated yet.</p>
               ) : (
                 <div className="grid grid-cols-2 gap-2 mb-4">
-                  {imagesForSuggestion.map((img) => {
-                    const url = displayUrls[img.suggestionId];
+                  {versionTiles.map((tile) => {
+                    const url = displayUrls[tile.relativePath];
                     return (
-                      <div
-                        key={img.suggestionId}
-                        className="aspect-video bg-background border border-border rounded-lg overflow-hidden relative"
+                      <button
+                        key={tile.relativePath}
+                        type="button"
+                        disabled={!url}
+                        title={url ? `${tile.versionLabel} — view image` : undefined}
+                        onClick={() =>
+                          onOpenLightbox(
+                            {
+                              suggestionId: tile.suggestionId,
+                              title: tile.title,
+                              transcriptExcerpt: tile.transcriptExcerpt,
+                            },
+                            url,
+                          )
+                        }
+                        className={`aspect-video bg-background border rounded-lg overflow-hidden relative disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow ${
+                          tile.isLatest ? "border-primary/60" : "border-border"
+                        }`}
                       >
                         {url ? (
-                          <img src={url} alt={img.title} className="w-full h-full object-cover" />
+                          <img src={url} alt={tile.title} className="w-full h-full object-cover" />
                         ) : (
                           <ImageIcon className="absolute inset-0 m-auto text-border" size={24} />
                         )}
-                      </div>
+                        <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[10px] text-white px-1 py-0.5 text-center truncate">
+                          {tile.versionLabel}
+                        </span>
+                      </button>
                     );
                   })}
                 </div>
@@ -1139,15 +1579,20 @@ function PromptPanel({
           ) : (
             <p className="text-textMuted text-sm">Select an overlay row to view its prompt.</p>
           )}
-          {hasAnalysis && (
+          {hasAnalysis && suggestion && (
             <button
               type="button"
-              disabled={generating}
-              onClick={onGenerateImages}
+              disabled={regenerating || !hasImages}
+              onClick={onRegenerateImage}
               className="w-full py-2.5 bg-primary hover:bg-primaryHover text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
             >
-              <Wand2 size={14} /> Generate images
+              <Wand2 size={14} /> Regenerate image
             </button>
+          )}
+          {hasAnalysis && suggestion && !hasImages && (
+            <p className="text-xs text-textMuted mt-2 text-center">
+              Generate this overlay on the Images tab first, then regenerate here.
+            </p>
           )}
         </div>
       </div>

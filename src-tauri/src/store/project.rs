@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::types::{
     FinalVideoTimeline, OverlayCandidate, OverlayCandidateStatus, ProjectManifest,
@@ -174,13 +175,128 @@ pub fn load_overlay_images_manifest(
     video_id: &str,
 ) -> Result<Option<OverlayImagesManifest>, String> {
     let path = overlay_images_manifest_path(paths, video_id)?;
+    load_overlay_images_manifest_file(&path)
+}
+
+fn load_overlay_images_manifest_file(path: &Path) -> Result<Option<OverlayImagesManifest>, String> {
     if !path.is_file() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read_overlay_manifest:{e}"))?;
+    let raw = fs::read_to_string(path).map_err(|e| format!("read_overlay_manifest:{e}"))?;
     serde_json::from_str(&raw)
         .map(Some)
         .map_err(|e| format!("parse_overlay_manifest:{e}"))
+}
+
+fn overlay_manifest_has_files_on_disk(root: &Path, manifest: &OverlayImagesManifest) -> bool {
+    manifest.images.iter().any(|img| {
+        let rel = img.relative_path.trim().trim_start_matches("./");
+        root.join(rel).is_file()
+    })
+}
+
+fn list_overlay_manifest_files(paths: &ProjectPaths) -> Result<Vec<PathBuf>, String> {
+    let images_dir = devotiontime_base(paths)?.join("images");
+    if !images_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&images_dir).map_err(|e| format!("read_images_dir:{e}"))? {
+        let entry = entry.map_err(|e| format!("read_images_entry:{e}"))?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".manifest.json"))
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn manifest_file_stem(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_suffix(".manifest.json")
+        .map(|s| s.to_string())
+}
+
+fn adopt_overlay_manifest_for_video(
+    paths: &ProjectPaths,
+    current_video_id: &str,
+    mut manifest: OverlayImagesManifest,
+) -> Result<OverlayImagesManifest, String> {
+    manifest.video_id = current_video_id.to_string();
+    save_overlay_images_manifest(paths, &manifest)?;
+    Ok(manifest)
+}
+
+/// Resolve overlay image manifest by id, legacy filename id, or any on-disk manifest for this episode.
+pub fn load_overlay_images_manifest_for_video(
+    paths: &ProjectPaths,
+    video_id: &str,
+    video_path: &str,
+) -> Result<Option<OverlayImagesManifest>, String> {
+    if let Some(manifest) = load_overlay_images_manifest(paths, video_id)? {
+        if overlay_manifest_has_files_on_disk(&paths.root, &manifest) {
+            return Ok(Some(manifest));
+        }
+    }
+
+    let legacy_id = video_id_from_path(video_path);
+    if legacy_id != video_id {
+        if let Some(manifest) = load_overlay_images_manifest(paths, &legacy_id)? {
+            if overlay_manifest_has_files_on_disk(&paths.root, &manifest) {
+                return adopt_overlay_manifest_for_video(paths, video_id, manifest).map(Some);
+            }
+        }
+    }
+
+    for path in list_overlay_manifest_files(paths)? {
+        let Some(stem) = manifest_file_stem(&path) else {
+            continue;
+        };
+        if stem != video_id && stem != legacy_id {
+            continue;
+        }
+        if let Some(manifest) = load_overlay_images_manifest_file(&path)? {
+            if overlay_manifest_has_files_on_disk(&paths.root, &manifest) {
+                return adopt_overlay_manifest_for_video(paths, video_id, manifest).map(Some);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Resolve analysis by id or legacy filename-based id (migrates to current id when found).
+pub fn load_transcript_analysis_for_video(
+    paths: &ProjectPaths,
+    video_id: &str,
+    video_path: &str,
+) -> Result<Option<TranscriptAnalysis>, String> {
+    if let Some(analysis) = load_transcript_analysis(paths, video_id)? {
+        return Ok(Some(analysis));
+    }
+
+    let legacy_id = video_id_from_path(video_path);
+    if legacy_id == video_id {
+        return Ok(None);
+    }
+
+    let Some(mut analysis) = load_transcript_analysis(paths, &legacy_id)? else {
+        return Ok(None);
+    };
+
+    analysis.video_id = video_id.to_string();
+    save_transcript_analysis(paths, &analysis)?;
+    let legacy_path = analysis_path(paths, &legacy_id);
+    if legacy_path.is_file() {
+        let _ = fs::remove_file(legacy_path);
+    }
+    Ok(Some(analysis))
 }
 
 pub fn save_transcript_analysis(
@@ -321,12 +437,12 @@ pub fn resolve_video_status_from_artifacts(
     video_id: &str,
     video_path: &str,
 ) -> Result<String, String> {
-    if let Some(img_manifest) = load_overlay_images_manifest(paths, video_id)? {
+    if let Some(img_manifest) = load_overlay_images_manifest_for_video(paths, video_id, video_path)? {
         if !img_manifest.images.is_empty() {
             return Ok("images_generated".to_string());
         }
     }
-    if load_transcript_analysis(paths, video_id)?.is_some() {
+    if load_transcript_analysis_for_video(paths, video_id, video_path)?.is_some() {
         return Ok("analyzed".to_string());
     }
     if has_transcript_for_video(paths, video_id, video_path)? {
@@ -371,6 +487,38 @@ pub fn refresh_video_statuses_in_manifest(root: &str) -> Result<ProjectManifest,
     Ok(manifest)
 }
 
+fn path_lookup_key(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+/// Short stable suffix so two different files with identical content get distinct video ids.
+pub fn path_disambiguator(path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path_lookup_key(path).as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    digest[..16.min(digest.len())].to_string()
+}
+
+/// Content fingerprints can collide when duplicate copies of the same video exist in one project.
+pub fn disambiguate_video_job_ids(jobs: &mut [VideoJob]) {
+    let mut by_fingerprint: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, job) in jobs.iter().enumerate() {
+        by_fingerprint.entry(job.id.clone()).or_default().push(i);
+    }
+    for indices in by_fingerprint.into_values() {
+        if indices.len() <= 1 {
+            continue;
+        }
+        for i in indices {
+            let job = &mut jobs[i];
+            let suffix = path_disambiguator(&job.path);
+            if !job.id.ends_with(&suffix) {
+                job.id = format!("{}__{}", job.id, suffix);
+            }
+        }
+    }
+}
+
 pub fn sync_videos_in_manifest(
     root: &str,
     discovered: Vec<VideoJob>,
@@ -382,15 +530,33 @@ pub fn sync_videos_in_manifest(
         .into_iter()
         .map(|video| (video.id.clone(), video))
         .collect();
+    let previous_by_path: HashMap<String, VideoJob> = previous
+        .values()
+        .map(|video| (path_lookup_key(&video.path), video.clone()))
+        .collect();
 
     let mut merged = Vec::with_capacity(discovered.len());
     for mut video in discovered {
-        if let Some(prev) = previous.get(&video.id) {
+        let prev = previous_by_path
+            .get(&path_lookup_key(&video.path))
+            .or_else(|| previous.get(&video.id));
+
+        if let Some(prev) = prev {
+            if prev.path == video.path {
+                // Keep stable id so transcripts, images, and timelines stay under .devotiontime/{id}/.
+                video.id = prev.id.clone();
+            }
             if prev.path != video.path {
                 video.status = "pending".to_string();
                 video.error = None;
             } else if prev.status == "failed" {
                 video.status = "failed".to_string();
+                video.error = prev.error.clone();
+            } else if matches!(
+                prev.status.as_str(),
+                "processing" | "transcribing" | "analyzing" | "generating_images"
+            ) {
+                video.status = prev.status.clone();
                 video.error = prev.error.clone();
             } else {
                 video.status = resolve_video_status_from_artifacts(&paths, &video.id, &video.path)?;
@@ -403,6 +569,7 @@ pub fn sync_videos_in_manifest(
         merged.push(video);
     }
 
+    disambiguate_video_job_ids(&mut merged);
     manifest.videos = merged;
     save_project(&manifest)?;
     Ok(manifest)

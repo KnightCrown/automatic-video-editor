@@ -1,13 +1,23 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Search, LayoutGrid, LayoutList, Check, Heart, Download } from "lucide-react";
+import { ImageLightbox, type ImageLightboxPayload } from "../components/ImageLightbox";
 import { useProject } from "../context/ProjectContext";
 import {
   getOverlayImageDisplayUrl,
   getOverlayImagesManifest,
+  getTranscriptAnalysis,
 } from "../services/pipelineService";
-import type { GeneratedOverlayImage, OverlayImagesManifest } from "../types/pipeline";
-import { downloadFromUrl, sanitizeDownloadFilename } from "../utils/download";
-import { excerptSnippet } from "../utils/format";
+import type {
+  GeneratedOverlayImage,
+  OverlayImagesManifest,
+  OverlaySuggestion,
+} from "../types/pipeline";
+import {
+  downloadFromUrl,
+  sanitizeDownloadFilename,
+  savePngListToChosenFolder,
+} from "../utils/download";
+import { excerptSnippet, overlaySuggestionTimeLabel } from "../utils/format";
 
 type GalleryItem = {
   videoId: string;
@@ -20,6 +30,11 @@ function itemKey(item: GalleryItem): string {
   return `${item.videoId}:${item.img.suggestionId}`;
 }
 
+function galleryDownloadFilename(item: GalleryItem): string {
+  const base = `${sanitizeDownloadFilename(item.img.title)}-${item.img.suggestionId.slice(0, 8)}.png`;
+  return `${item.videoId}-${base}`;
+}
+
 export function GalleryPage() {
   const { project } = useProject();
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -30,6 +45,12 @@ export function GalleryPage() {
   const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lightbox, setLightbox] = useState<ImageLightboxPayload | null>(null);
+  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+  const [bulkDownloading, setBulkDownloading] = useState(false);
+  const [suggestionsByVideo, setSuggestionsByVideo] = useState<
+    Record<string, Record<string, OverlaySuggestion>>
+  >({});
 
   const projectVideos = useMemo(() => project?.videos ?? [], [project?.videos]);
 
@@ -41,8 +62,17 @@ export function GalleryPage() {
     setLoading(true);
     try {
       const all: GalleryItem[] = [];
+      const suggestionMap: Record<string, Record<string, OverlaySuggestion>> = {};
       for (const video of projectVideos) {
-        const manifest = await getOverlayImagesManifest(project.rootPath, video.id);
+        const [manifest, analysis] = await Promise.all([
+          getOverlayImagesManifest(project.rootPath, video.id),
+          getTranscriptAnalysis(project.rootPath, video.id).catch(() => null),
+        ]);
+        if (analysis?.suggestions.length) {
+          suggestionMap[video.id] = Object.fromEntries(
+            analysis.suggestions.map((s) => [s.id, s]),
+          );
+        }
         if (!manifest?.images.length) continue;
         for (const img of manifest.images) {
           all.push({
@@ -58,6 +88,7 @@ export function GalleryPage() {
           new Date(b.img.generatedAt).getTime() - new Date(a.img.generatedAt).getTime(),
       );
       setItems(all);
+      setSuggestionsByVideo(suggestionMap);
     } finally {
       setLoading(false);
     }
@@ -116,6 +147,49 @@ export function GalleryPage() {
     return filtered.find((i) => itemKey(i) === selectedKey) ?? filtered[0] ?? null;
   }, [filtered, selectedKey]);
 
+  function openItemLightbox(item: GalleryItem, imageUrl?: string) {
+    if (!imageUrl) return;
+    const suggestion = suggestionsByVideo[item.videoId]?.[item.img.suggestionId];
+    setLightbox({
+      imageUrl,
+      title: item.img.title,
+      excerpt: item.img.transcriptExcerpt,
+      timeLabel: suggestion ? overlaySuggestionTimeLabel(suggestion) : undefined,
+      downloadFilename: galleryDownloadFilename(item),
+    });
+  }
+
+  function toggleChecked(key: string) {
+    setCheckedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  async function handleDownloadSelected() {
+    const keys = [...checkedKeys];
+    if (keys.length === 0) return;
+    setBulkDownloading(true);
+    try {
+      const downloads: { url: string; filename: string }[] = [];
+      for (const key of keys) {
+        const item = items.find((i) => itemKey(i) === key);
+        const url = item ? displayUrls[key] : undefined;
+        if (!item || !url) continue;
+        downloads.push({ url, filename: galleryDownloadFilename(item) });
+      }
+      if (downloads.length === 1) {
+        await downloadFromUrl(downloads[0].url, downloads[0].filename);
+      } else if (downloads.length > 1) {
+        await savePngListToChosenFolder(downloads);
+      }
+    } finally {
+      setBulkDownloading(false);
+    }
+  }
+
   if (!project) {
     return (
       <NoProjectMessage />
@@ -157,6 +231,19 @@ export function GalleryPage() {
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          disabled={checkedKeys.size === 0 || bulkDownloading}
+          onClick={() => void handleDownloadSelected()}
+          className="flex items-center gap-2 bg-[#8B5CF6] hover:bg-[#7C3AED] disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium"
+        >
+          <Download size={16} />
+          {bulkDownloading
+            ? "Downloading…"
+            : checkedKeys.size > 0
+              ? `Download (${checkedKeys.size})`
+              : "Download"}
+        </button>
         <ViewModeToggle viewMode={viewMode} setViewMode={setViewMode} />
       </div>
 
@@ -178,17 +265,25 @@ export function GalleryPage() {
             displayUrls={displayUrls}
             previewErrors={previewErrors}
             selectedKey={selected ? itemKey(selected) : null}
+            checkedKeys={checkedKeys}
             onSelect={setSelectedKey}
+            onToggleChecked={toggleChecked}
+            onOpenLightbox={openItemLightbox}
           />
           {selected && (
             <GalleryDetailPanel
               item={selected}
               displayUrl={displayUrls[itemKey(selected)]}
               previewError={previewErrors[itemKey(selected)]}
+              onOpenLightbox={() =>
+                openItemLightbox(selected, displayUrls[itemKey(selected)])
+              }
             />
           )}
         </div>
       )}
+
+      <ImageLightbox payload={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
 }
@@ -245,14 +340,20 @@ function GalleryGrid({
   displayUrls,
   previewErrors,
   selectedKey,
+  checkedKeys,
   onSelect,
+  onToggleChecked,
+  onOpenLightbox,
 }: {
   filtered: GalleryItem[];
   viewMode: "grid" | "list";
   displayUrls: Record<string, string>;
   previewErrors: Record<string, string>;
   selectedKey: string | null;
+  checkedKeys: Set<string>;
   onSelect: (key: string) => void;
+  onToggleChecked: (key: string) => void;
+  onOpenLightbox: (item: GalleryItem, imageUrl?: string) => void;
 }) {
   return (
     <div
@@ -266,12 +367,20 @@ function GalleryGrid({
         const key = itemKey(item);
         const url = displayUrls[key];
         const isSelected = selectedKey === key;
+        const isChecked = checkedKeys.has(key);
         return (
-          <button
+          <div
             key={key}
-            type="button"
+            role="button"
+            tabIndex={0}
             onClick={() => onSelect(key)}
-            className={`text-left bg-surface border rounded-xl overflow-hidden transition-colors ${
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(key);
+              }
+            }}
+            className={`text-left bg-surface border rounded-xl overflow-hidden transition-colors cursor-pointer ${
               isSelected ? "border-primary" : "border-border hover:border-gray-600"
             } ${
               viewMode === "grid"
@@ -279,11 +388,31 @@ function GalleryGrid({
                 : "flex flex-shrink-0 gap-4 p-3 w-full min-h-[5.5rem]"
             }`}
           >
-            <div
-              className={`bg-background relative flex items-center justify-center overflow-hidden ${
-                viewMode === "list" ? "w-32 h-20 flex-shrink-0 rounded-lg" : "aspect-square"
+            <button
+              type="button"
+              disabled={!url}
+              title={url ? "View image" : undefined}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenLightbox(item, url);
+              }}
+              className={`bg-background relative flex items-center justify-center overflow-hidden disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow ${
+                viewMode === "list" ? "w-32 h-20 flex-shrink-0 rounded-lg" : "aspect-square w-full"
               }`}
             >
+              <label
+                className="absolute top-2 left-2 z-10"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => onToggleChecked(key)}
+                  className="w-4 h-4 rounded border-border bg-background accent-primary cursor-pointer"
+                  aria-label={`Select ${item.img.title} for download`}
+                />
+              </label>
               {url ? (
                 <img src={url} alt={item.img.title} className="w-full h-full object-cover" />
               ) : previewErrors[key] ? (
@@ -292,11 +421,11 @@ function GalleryGrid({
                 <span className="text-textMuted text-xs">Loading…</span>
               )}
               {isSelected && (
-                <div className="absolute top-2 left-2 bg-primary text-white p-1 rounded">
+                <div className="absolute top-2 right-2 bg-primary text-white p-1 rounded pointer-events-none">
                   <Check size={14} />
                 </div>
               )}
-            </div>
+            </button>
             <div className={viewMode === "list" ? "flex-1 min-w-0 py-1" : "p-3"}>
               <p className="text-sm text-white font-medium truncate mb-1">{item.img.title}</p>
               <p className="text-xs text-textMuted mb-2 truncate">{item.videoFileName}</p>
@@ -304,7 +433,7 @@ function GalleryGrid({
                 {new Date(item.img.generatedAt).toLocaleDateString()}
               </p>
             </div>
-          </button>
+          </div>
         );
       })}
     </div>
@@ -315,16 +444,24 @@ function GalleryDetailPanel({
   item,
   displayUrl,
   previewError,
+  onOpenLightbox,
 }: {
   item: GalleryItem;
   displayUrl?: string;
   previewError?: string;
+  onOpenLightbox: () => void;
 }) {
   const fileName = `${sanitizeDownloadFilename(item.img.title)}-${item.img.suggestionId.slice(0, 8)}.png`;
 
   return (
     <div className="w-[340px] flex-shrink-0 flex flex-col bg-surface border border-border rounded-xl overflow-hidden hidden xl:flex">
-      <div className="aspect-video bg-background border-b border-border flex items-center justify-center">
+      <button
+        type="button"
+        disabled={!displayUrl}
+        title={displayUrl ? "View larger" : undefined}
+        onClick={onOpenLightbox}
+        className="aspect-video w-full bg-background border-b border-border flex items-center justify-center disabled:cursor-default hover:bg-white/5 transition-colors"
+      >
         {displayUrl ? (
           <img src={displayUrl} alt={item.img.title} className="w-full h-full object-contain" />
         ) : previewError ? (
@@ -332,7 +469,7 @@ function GalleryDetailPanel({
         ) : (
           <p className="text-textMuted text-sm">Loading…</p>
         )}
-      </div>
+      </button>
       <div className="p-5 flex-1 overflow-y-auto flex flex-col">
         <div className="flex items-start justify-between gap-2 mb-2">
           <h3 className="text-lg text-white font-semibold">{item.img.title}</h3>

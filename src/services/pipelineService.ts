@@ -172,9 +172,38 @@ export async function getOverlayImageDisplayUrl(
   return convertFileSrc(abs);
 }
 
+export async function regenerateOverlayImage(
+  rootPath: string,
+  videoId: string,
+  suggestionId: string,
+  onProgress?: (progress: ImageGenerationProgress) => void,
+): Promise<OverlayImagesManifest> {
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<ImageGenerationProgress>(
+      "image_generation_progress",
+      (event) => {
+        onProgress(event.payload);
+      },
+    );
+  }
+  try {
+    return invoke<OverlayImagesManifest>("regenerate_overlay_image", {
+      rootPath,
+      videoId,
+      suggestionId,
+    });
+  } finally {
+    if (unlisten) {
+      await unlisten();
+    }
+  }
+}
+
 export async function generateOverlayImages(
   rootPath: string,
   videoId: string,
+  suggestionIds: string[] = [],
   onProgress?: (progress: ImageGenerationProgress) => void,
 ): Promise<OverlayImagesManifest> {
   let unlisten: UnlistenFn | undefined;
@@ -190,6 +219,7 @@ export async function generateOverlayImages(
     return invoke<OverlayImagesManifest>("generate_overlay_images", {
       rootPath,
       videoId,
+      suggestionIds,
     });
   } finally {
     if (unlisten) {

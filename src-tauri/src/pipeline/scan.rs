@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::audio::ffmpeg::is_video_file;
 use crate::store::fingerprint::content_fingerprint;
+use crate::store::project::disambiguate_video_job_ids;
 use crate::types::VideoJob;
 
 const MAX_DEPTH: u32 = 2;
@@ -18,6 +19,7 @@ pub fn scan_video_folder(root: &str) -> Result<Vec<VideoJob>, String> {
     let mut jobs = Vec::new();
     collect_videos(&root_path, &root_path, 0, &mut jobs)?;
     jobs.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    disambiguate_video_job_ids(&mut jobs);
     Ok(jobs)
 }
 

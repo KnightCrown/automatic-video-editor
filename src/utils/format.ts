@@ -16,6 +16,17 @@ export function formatIdealDisplayMs(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+export function overlaySuggestionTimeLabel(s: {
+  startMs?: number;
+  endMs?: number;
+  idealDisplayMs?: number;
+}): string | undefined {
+  if (s.startMs === undefined && s.endMs === undefined) return undefined;
+  const range = formatTimeRangeMs(s.startMs, s.endMs);
+  if (s.idealDisplayMs === undefined) return range;
+  return `${range} · display ${formatIdealDisplayMs(s.idealDisplayMs)}`;
+}
+
 export function projectDisplayName(rootPath: string): string {
   const parts = rootPath.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? rootPath;

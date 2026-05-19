@@ -91,14 +91,24 @@ pub struct TranscriptAnalysis {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OverlayImageVersion {
+    /// Path relative to project root using forward slashes.
+    pub relative_path: String,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GeneratedOverlayImage {
     pub suggestion_id: String,
     pub title: String,
     pub image_prompt: String,
     pub transcript_excerpt: String,
-    /// Path relative to project root using forward slashes.
+    /// Active version used for final video / gallery (latest unless changed later).
     pub relative_path: String,
     pub generated_at: String,
+    #[serde(default)]
+    pub versions: Vec<OverlayImageVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +173,11 @@ pub struct PipelineProgress {
     pub stage: String,
     pub percent: f32,
     pub message: Option<String>,
+    /// 1-based index within the current batch (e.g. transcribing episode 2 of 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_total: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

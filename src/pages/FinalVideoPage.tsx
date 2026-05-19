@@ -23,6 +23,7 @@ import type {
   VideoJob,
   VideoOverlayClip,
 } from "../types/pipeline";
+import { videoHasTranscriptArtifact } from "../utils/format";
 
 function exportStageLabel(stage: string): string {
   switch (stage) {
@@ -75,19 +76,19 @@ export function FinalVideoPage() {
   const [editingVideo, setEditingVideo] = useState<VideoJob | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const transcribedVideos = useMemo(
-    () => project?.videos.filter((v) => v.status === "transcribed") ?? [],
+  const pipelineVideos = useMemo(
+    () => project?.videos.filter((v) => videoHasTranscriptArtifact(v.status)) ?? [],
     [project?.videos],
   );
 
   const readyVideos = useMemo(
     () =>
-      transcribedVideos.filter((v) => {
+      pipelineVideos.filter((v) => {
         const m = manifestByVideo[v.id];
         const a = analysisByVideo[v.id];
         return m && m.images.length > 0 && a && a.suggestions.length > 0;
       }),
-    [transcribedVideos, manifestByVideo, analysisByVideo],
+    [pipelineVideos, manifestByVideo, analysisByVideo],
   );
 
   const refresh = useCallback(async () => {
@@ -95,13 +96,13 @@ export function FinalVideoPage() {
     setLoading(true);
     try {
       const man = await Promise.all(
-        transcribedVideos.map(async (v) => {
+        pipelineVideos.map(async (v) => {
           const m = await getOverlayImagesManifest(project.rootPath, v.id);
           return [v.id, m] as const;
         }),
       );
       const ana = await Promise.all(
-        transcribedVideos.map(async (v) => {
+        pipelineVideos.map(async (v) => {
           const a = await getTranscriptAnalysis(project.rootPath, v.id);
           return [v.id, a] as const;
         }),
@@ -110,7 +111,7 @@ export function FinalVideoPage() {
       setAnalysisByVideo(Object.fromEntries(ana));
 
       const timelines = await Promise.all(
-        transcribedVideos.map(async (v) => {
+        pipelineVideos.map(async (v) => {
           try {
             const t = await getFinalVideoTimeline(project.rootPath, v.id);
             return [v.id, t] as const;
@@ -123,7 +124,7 @@ export function FinalVideoPage() {
     } finally {
       setLoading(false);
     }
-  }, [project, transcribedVideos]);
+  }, [project, pipelineVideos]);
 
   useEffect(() => {
     void refresh();
@@ -219,12 +220,12 @@ export function FinalVideoPage() {
       ) : null}
 
       {!project ? (
-        <p className="muted">Open a project first from the Projects page.</p>
+        <p className="muted">Open a project first from Overview.</p>
       ) : readyVideos.length === 0 ? (
         <p className="muted">
-          Complete the pipeline first: transcribe a video, run overlay analysis on{" "}
-          <Link to="/overlays">Overlays</Link>, then generate images on{" "}
-          <Link to="/images">Images</Link>.
+          Complete the pipeline first: transcribe a video in Overview, then open{" "}
+          <Link to="/editing">Editing</Link> to analyze overlays, generate images, and use{" "}
+          <strong>Create video</strong> to build a timeline.
         </p>
       ) : (
         <>

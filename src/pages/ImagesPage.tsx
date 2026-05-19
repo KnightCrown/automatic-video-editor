@@ -188,6 +188,7 @@ export function ImagesPage() {
         const m = await generateOverlayImages(
           project.rootPath,
           videoId,
+          [],
           (p) => setProgress(p),
         );
         setManifestByVideo((prev) => ({ ...prev, [videoId]: m }));

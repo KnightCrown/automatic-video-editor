@@ -6,6 +6,18 @@ use serde_json::json;
 
 const XAI_IMAGES_URL: &str = "https://api.x.ai/v1/images/generations";
 
+/// Prepended to every Grok Imagine request before the OpenAI overlay scene prompt.
+pub const GROK_IMAGINE_STYLE_PREFIX: &str = "Create a clean and cheerful 2D illustrated children's Bible scene with simple hand-drawn line art, bold black outlines, and bright flat colors. Use a classic educational storybook illustration style rather than chibi or super-deformed cartoon proportions. Adults should have realistic adult body proportions with taller height, broader shoulders, longer arms and legs, and mature facial features. Children should clearly look younger and smaller with childlike proportions and shorter height. Keep the illustration wholesome, warm, and family-friendly. Use minimal shading, expressive faces, simple clean backgrounds, and colorful clothing. Avoid anime proportions, avoid oversized heads, avoid chibi style, avoid tiny adult bodies, avoid exaggerated baby-like features. Maintain a simple storybook aesthetic with believable human proportions and clear visual distinction between adults and children.";
+
+/// Style guide first, then the OpenAI scene description — sent as one prompt to Grok Imagine.
+pub fn compose_grok_imagine_prompt(scene_prompt: &str) -> String {
+    let scene = scene_prompt.trim();
+    if scene.is_empty() {
+        return GROK_IMAGINE_STYLE_PREFIX.to_string();
+    }
+    format!("{GROK_IMAGINE_STYLE_PREFIX}\n\n{scene}")
+}
+
 #[derive(Debug, Deserialize)]
 struct XaiImageItem {
     b64_json: Option<String>,
@@ -23,14 +35,15 @@ pub async fn generate_imagine_png(
     model: &str,
     prompt: &str,
 ) -> Result<Vec<u8>, String> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
+    let scene = prompt.trim();
+    if scene.is_empty() {
         return Err("image_prompt_empty".to_string());
     }
+    let full_prompt = compose_grok_imagine_prompt(scene);
 
     let body = json!({
         "model": model,
-        "prompt": trimmed,
+        "prompt": full_prompt,
         "n": 1,
         "response_format": "b64_json",
         "aspect_ratio": "16:9",
