@@ -280,6 +280,12 @@ pub struct VideoOverlayClip {
     pub start_ms: u64,
     pub duration_ms: u64,
     pub layout: OverlayClipLayout,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

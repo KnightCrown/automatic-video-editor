@@ -204,6 +204,9 @@ export interface VideoOverlayClip {
   startMs: number;
   durationMs: number;
   layout: OverlayClipLayout;
+  opacityPct?: number;
+  entrance?: "none" | "fade-in";
+  exit?: "none" | "fade-out";
 }
 
 export interface FinalVideoTimeline {

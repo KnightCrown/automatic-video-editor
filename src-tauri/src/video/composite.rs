@@ -68,6 +68,50 @@ fn ms_to_sec(ms: u64) -> f64 {
     ms as f64 / 1000.0
 }
 
+fn clip_opacity_alpha(clip: &VideoOverlayClip) -> f64 {
+    (clip.opacity_pct.unwrap_or(100.0) / 100.0).clamp(0.0, 1.0)
+}
+
+fn overlay_x_expr(clip: &VideoOverlayClip, margin_x: i32) -> String {
+    if clip.layout.anchor == "top-left" {
+        margin_x.to_string()
+    } else {
+        format!("main_w-overlay_w-{margin_x}")
+    }
+}
+
+fn overlay_input_filter(
+    input_idx: usize,
+    overlay_w: u32,
+    clip: &VideoOverlayClip,
+    label: &str,
+    upload_cuda: bool,
+) -> String {
+    let start = ms_to_sec(clip.start_ms);
+    let duration = ms_to_sec(clip.duration_ms).max(0.001);
+    let fade_dur = duration.min(0.35).min(duration / 2.0);
+    let opacity = clip_opacity_alpha(clip);
+    let mut filters = vec!["format=rgba".to_string(), format!("scale={overlay_w}:-1")];
+
+    if clip.entrance.as_deref() == Some("fade-in") && fade_dur > 0.0 {
+        filters.push(format!("fade=t=in:st=0:d={fade_dur:.3}:alpha=1"));
+    }
+    if clip.exit.as_deref() == Some("fade-out") && fade_dur > 0.0 {
+        let fade_start = (duration - fade_dur).max(0.0);
+        filters.push(format!(
+            "fade=t=out:st={fade_start:.3}:d={fade_dur:.3}:alpha=1"
+        ));
+    }
+
+    filters.push(format!("colorchannelmixer=aa={opacity:.3}"));
+    filters.push(format!("setpts=PTS+{start:.6}/TB"));
+    if upload_cuda {
+        filters.push("hwupload_cuda".to_string());
+    }
+
+    format!("[{input_idx}:v]{}[{label}]", filters.join(","))
+}
+
 fn build_cpu_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u32) -> String {
     if clips.is_empty() {
         return "[0:v]copy[vout]".to_string();
@@ -85,17 +129,24 @@ fn build_cpu_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u
             ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
         let margin_y =
             ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
+        let x_expr = overlay_x_expr(clip, margin_x);
 
-        filter_parts.push(format!("[{input_idx}:v]scale={overlay_w}:-1[ov{i}]"));
+        filter_parts.push(overlay_input_filter(
+            input_idx,
+            overlay_w,
+            clip,
+            &format!("ov{i}"),
+            false,
+        ));
         let out_label = if i == clips.len() - 1 {
             "vout".to_string()
         } else {
             format!("v{i}")
         };
         filter_parts.push(format!(
-            "{last}[ov{i}]overlay=x=main_w-overlay_w-{margin_x}:y={margin_y}:enable='between(t,{start},{end})'[{out_label}]",
+            "{last}[ov{i}]overlay=x={x_expr}:y={margin_y}:enable='between(t,{start},{end})'[{out_label}]",
             last = last_label,
-            margin_x = margin_x,
+            x_expr = x_expr,
             margin_y = margin_y,
             start = start,
             end = end,
@@ -124,9 +175,14 @@ fn build_cuda_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: 
             ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
         let margin_y =
             ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
+        let x_expr = overlay_x_expr(clip, margin_x);
 
-        parts.push(format!(
-            "[{input_idx}:v]format=rgba,scale={overlay_w}:-1,hwupload_cuda[ov{i}]"
+        parts.push(overlay_input_filter(
+            input_idx,
+            overlay_w,
+            clip,
+            &format!("ov{i}"),
+            true,
         ));
         let out = if i == clips.len() - 1 {
             "vout".to_string()
@@ -134,9 +190,9 @@ fn build_cuda_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: 
             format!("base{}", i + 1)
         };
         parts.push(format!(
-            "[{last}][ov{i}]overlay_cuda=x=main_w-overlay_w-{margin_x}:y={margin_y}:enable='between(t,{start},{end})'[{out}]",
+            "[{last}][ov{i}]overlay_cuda=x={x_expr}:y={margin_y}:enable='between(t,{start},{end})'[{out}]",
             last = last,
-            margin_x = margin_x,
+            x_expr = x_expr,
             margin_y = margin_y,
             start = start,
             end = end,
@@ -443,12 +499,8 @@ pub async fn export_video_with_overlays(
     video_path: String,
     video_id: String,
     output_path: String,
-    mut clips: Vec<VideoOverlayClip>,
+    clips: Vec<VideoOverlayClip>,
 ) -> Result<String, String> {
-    let layout = settings.default_overlay_layout.clone();
-    for clip in &mut clips {
-        clip.layout = layout.clone();
-    }
     let emit = |stage: &str, percent: f32, message: Option<String>| {
         let _ = app.emit(
             "video_export_progress",

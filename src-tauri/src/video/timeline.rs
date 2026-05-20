@@ -65,6 +65,9 @@ pub fn build_clips_from_analysis_and_manifest(
             start_ms,
             duration_ms,
             layout: layout.clone(),
+            opacity_pct: None,
+            entrance: None,
+            exit: None,
         });
     }
 

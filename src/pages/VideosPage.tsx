@@ -23,10 +23,6 @@ import type {
   VideoOverlayClip,
 } from "../types/pipeline";
 import { displayPipelineStatus } from "../utils/format";
-import {
-  applyOverlayLayoutToClips,
-  overlayLayoutFromSettings,
-} from "../utils/overlayLayout";
 
 export function VideosPage() {
   const { project } = useProject();
@@ -60,11 +56,7 @@ export function VideosPage() {
     return project.videos.find((v) => v.path === activeVideoPath) ?? null;
   }, [project?.videos, activeVideoPath]);
 
-  const overlayLayout = overlayLayoutFromSettings(project?.settings);
-  const clips = useMemo(
-    () => applyOverlayLayoutToClips(timeline?.clips ?? [], overlayLayout),
-    [timeline?.clips, overlayLayout],
-  );
+  const clips = useMemo(() => timeline?.clips ?? [], [timeline?.clips]);
 
   useEffect(() => {
     if (!project?.videos.length) {
@@ -196,14 +188,13 @@ export function VideosPage() {
         setActiveVideoPath(video.path);
 
         const t = await getFinalVideoTimeline(project.rootPath, video.id);
-        const videoClips = applyOverlayLayoutToClips(t.clips, overlayLayout);
-        if (videoClips.length === 0) continue;
+        if (t.clips.length === 0) continue;
 
         const ran = await startExport({
           videoId: video.id,
           fileName: video.fileName,
           rootPath: project.rootPath,
-          clips: videoClips,
+          clips: t.clips,
         });
         if (!ran) break;
       }
@@ -218,7 +209,6 @@ export function VideosPage() {
     selectedVideoIds,
     timelineFlags,
     ffmpegOk,
-    overlayLayout,
     startExport,
     loadEpisodeSummaries,
     loadActiveEpisode,
@@ -329,6 +319,15 @@ export function VideosPage() {
             };
             await saveFinalVideoTimeline(project.rootPath, nextTimeline);
             setTimeline(nextTimeline);
+          }}
+          isQueued={selectedVideoIds.has(editingVideo.id)}
+          onAddToRenderQueue={() => {
+            setSelectedVideoIds((prev) => {
+              if (prev.has(editingVideo.id)) return prev;
+              const next = new Set(prev);
+              next.add(editingVideo.id);
+              return next;
+            });
           }}
           onClose={() => setEditingVideo(null)}
         />

@@ -24,10 +24,6 @@ import type {
   VideoOverlayClip,
 } from "../types/pipeline";
 import { videoHasTranscriptArtifact } from "../utils/format";
-import {
-  applyOverlayLayoutToClips,
-  overlayLayoutFromSettings,
-} from "../utils/overlayLayout";
 
 function exportStageLabel(stage: string): string {
   switch (stage) {
@@ -161,15 +157,10 @@ export function FinalVideoPage() {
     [project],
   );
 
-  const overlayLayout = overlayLayoutFromSettings(project?.settings);
-
   const panels: EpisodePanelSpec[] = useMemo(
     () =>
       readyVideos.map((v) => {
-        const clips = applyOverlayLayoutToClips(
-          timelineByVideo[v.id]?.clips ?? [],
-          overlayLayout,
-        );
+        const clips = timelineByVideo[v.id]?.clips ?? [];
         const imageCount = manifestByVideo[v.id]?.images.length ?? 0;
         const exportStatus = getSession(v.id).status;
         const exportSubtitle =
@@ -203,16 +194,12 @@ export function FinalVideoPage() {
       ffmpegOk,
       handleRebuildTimeline,
       getSession,
-      overlayLayout,
     ],
   );
 
   const editingClips =
     editingVideo && timelineByVideo[editingVideo.id]
-      ? applyOverlayLayoutToClips(
-          timelineByVideo[editingVideo.id]!.clips,
-          overlayLayout,
-        )
+      ? timelineByVideo[editingVideo.id]!.clips
       : [];
 
   return (
