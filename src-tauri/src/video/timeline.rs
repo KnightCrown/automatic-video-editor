@@ -2,10 +2,11 @@ use std::path::Path;
 
 use chrono::Utc;
 
-use crate::pipeline::assets::resolve_asset_absolute;
+use crate::pipeline::assets::{propose_asset_placements_from_settings, resolve_asset_absolute};
 use crate::store::project::{
     load_final_video_timeline, load_overlay_images_manifest_for_video, load_project,
-    load_transcript_analysis_for_video, project_paths, save_final_video_timeline,
+    load_transcript_analysis_for_video, load_transcript_for_video, project_paths,
+    save_final_video_timeline, save_transcript_analysis,
 };
 use crate::types::{
     AssetPlacement, FinalVideoTimeline, OverlayClipLayout, OverlayImagesManifest,
@@ -101,6 +102,29 @@ pub fn build_asset_video_clips(
         clips.push(clip);
     }
     Ok(clips)
+}
+
+pub fn refresh_asset_placements_from_current_prompt(
+    root_path: &str,
+    video_id: &str,
+) -> Result<(), String> {
+    let paths = project_paths(root_path)?;
+    let project = load_project(root_path)?;
+    let Some(video) = project.videos.iter().find(|v| v.id == video_id) else {
+        return Err("video_not_found".to_string());
+    };
+    let Some(mut analysis) = load_transcript_analysis_for_video(&paths, video_id, &video.path)?
+    else {
+        return Ok(());
+    };
+    let Some(transcript) = load_transcript_for_video(&paths, video_id, &video.path)? else {
+        return Ok(());
+    };
+
+    let content_end_hint = analysis.content_bounds.as_ref().map(|b| b.content_end_ms);
+    analysis.asset_placements =
+        propose_asset_placements_from_settings(&transcript, &project.settings, content_end_hint);
+    save_transcript_analysis(&paths, &analysis)
 }
 
 /// Load saved timeline or build from analysis + images. Rebuilds when saved file is missing clips

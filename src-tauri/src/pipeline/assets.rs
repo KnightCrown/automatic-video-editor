@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::pipeline::word_timing::{
     find_phrase_occurrences, find_word_occurrences, normalize_token, words_for_matching,
 };
-use crate::types::{ProposedAssetTrigger, Transcript};
+use crate::types::{AssetPlacement, ProjectSettings, ProposedAssetTrigger, Transcript};
 use crate::video::encoders::probe_video_duration_sec;
 use crate::video::extensions::is_video_file_extension;
 
@@ -230,7 +230,7 @@ fn quoted_phrases_before_asset(ctx: &str, asset_idx: usize) -> Vec<String> {
     let mut phrases = Vec::new();
     let mut start: Option<(usize, char)> = None;
     for (idx, ch) in before.char_indices() {
-        if ch == '"' || ch == '“' || ch == '”' {
+        if ch == '"' || ch == '\u{201c}' || ch == '\u{201d}' {
             if let Some((open, open_ch)) = start.take() {
                 if idx > open + open_ch.len_utf8() {
                     phrases.push(before[open + open_ch.len_utf8()..idx].to_string());
@@ -512,6 +512,79 @@ pub fn propose_asset_triggers(
     }
 
     proposed
+}
+
+pub fn asset_placements_from_proposals(proposed: &[ProposedAssetTrigger]) -> Vec<AssetPlacement> {
+    let mut placements: Vec<AssetPlacement> = proposed
+        .iter()
+        .map(|p| AssetPlacement {
+            id: uuid::Uuid::new_v4().to_string(),
+            asset_file_name: p.asset_file_name.clone(),
+            trigger_word: p.trigger_word.clone(),
+            placement_kind: p.placement_kind.clone(),
+            timeline_mode: p.timeline_mode.clone(),
+            start_ms: p.start_ms,
+            duration_ms: p.duration_ms,
+            transcript_excerpt: Some(p.transcript_excerpt.clone()),
+            verified: true,
+            rationale: "Matched from the current master prompt and transcript timing.".to_string(),
+            track_index: if p.timeline_mode == "insert"
+                || p.placement_kind == "intro"
+                || p.placement_kind == "outro"
+            {
+                2
+            } else {
+                1
+            },
+            full_screen: p.full_screen,
+        })
+        .collect();
+
+    placements.sort_by(|a, b| {
+        (
+            a.start_ms,
+            a.asset_file_name.to_lowercase(),
+            a.placement_kind.clone(),
+        )
+            .cmp(&(
+                b.start_ms,
+                b.asset_file_name.to_lowercase(),
+                b.placement_kind.clone(),
+            ))
+    });
+    placements.dedup_by(|a, b| {
+        a.asset_file_name.eq_ignore_ascii_case(&b.asset_file_name)
+            && a.placement_kind == b.placement_kind
+            && a.timeline_mode == b.timeline_mode
+            && a.start_ms.abs_diff(b.start_ms) <= 500
+    });
+    placements
+}
+
+pub fn propose_asset_placements_from_settings(
+    transcript: &Transcript,
+    settings: &ProjectSettings,
+    content_end_hint_ms: Option<u64>,
+) -> Vec<AssetPlacement> {
+    let video_duration_ms = probe_video_duration_sec(&transcript.video_path)
+        .map(|s| (s * 1000.0).round().max(1.0) as u64)
+        .unwrap_or_else(|_| transcript.segments.last().map(|s| s.end_ms).unwrap_or(0));
+    let provisional_end = content_end_hint_ms
+        .unwrap_or_else(|| provisional_content_end_ms(transcript, video_duration_ms))
+        .min(video_duration_ms);
+    let asset_folder = settings
+        .asset_folder_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(Path::new);
+    let proposed = propose_asset_triggers(
+        transcript,
+        &settings.show_context,
+        asset_folder,
+        video_duration_ms,
+        provisional_end,
+    );
+    asset_placements_from_proposals(&proposed)
 }
 
 pub fn provisional_content_end_ms(transcript: &Transcript, video_duration_ms: u64) -> u64 {

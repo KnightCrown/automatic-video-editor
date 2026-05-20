@@ -41,7 +41,10 @@ use crate::types::{
 use crate::video::composite::export_video_with_overlays;
 use crate::video::encoders::refresh_video_export_preflight_cache;
 use crate::video::export_session::VideoExportController;
-use crate::video::timeline::{build_default_timeline, resolve_final_video_timeline};
+use crate::video::timeline::{
+    build_default_timeline, refresh_asset_placements_from_current_prompt,
+    resolve_final_video_timeline,
+};
 use crate::video::timeline_media::import_timeline_video;
 use tauri::Emitter;
 use tauri::Manager;
@@ -395,6 +398,7 @@ fn rebuild_final_video_timeline(
     video_id: String,
 ) -> Result<FinalVideoTimeline, String> {
     let paths = project_paths(&root_path)?;
+    refresh_asset_placements_from_current_prompt(&root_path, &video_id)?;
     let timeline = build_default_timeline(&root_path, &video_id)?;
     save_final_video_timeline(&paths, &timeline)?;
     Ok(timeline)

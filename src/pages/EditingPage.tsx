@@ -28,6 +28,7 @@ import {
 } from "../services/pipelineService";
 import { isParakeetModelReady } from "../services/parakeetModelService";
 import type {
+  AssetPlacement,
   ImageGenerationProgress,
   OverlayImagesManifest,
   OverlaySuggestion,
@@ -421,7 +422,7 @@ export function EditingPage() {
     );
     if (!project || !activeVideo || clipIds.length === 0) return;
     setCreatingVideo(true);
-    setCreateVideoStatus("Preparing final video timeline...");
+    setCreateVideoStatus("Refreshing asset placements from the master prompt...");
     setError(null);
     try {
       await prepareFinalVideoTimelineWithSelection(project.rootPath, activeVideo.id, clipIds);
@@ -535,7 +536,14 @@ export function EditingPage() {
 
   const hasTranscript =
     Boolean(transcript) || videoHasTranscriptArtifact(activeVideo?.status);
-  const hasAnalysis = !!(analysis && analysis.suggestions.length > 0);
+  const overlayTimelineCount =
+    (analysis?.suggestions.length ?? 0) + (analysis?.assetPlacements?.length ?? 0);
+  const hasAnalysis = !!(analysis && overlayTimelineCount > 0);
+
+  const selectedAsset = useMemo(
+    () => analysis?.assetPlacements?.find((a) => a.id === selectedSuggestionId) ?? null,
+    [analysis, selectedSuggestionId],
+  );
 
   return (
     <div className="flex-1 flex flex-col p-6 h-full overflow-hidden">
@@ -603,7 +611,7 @@ export function EditingPage() {
                   active={activeTab === "overlays"}
                   onClick={() => setActiveTab("overlays")}
                   label="Overlay Suggestions"
-                  count={analysis?.suggestions.length ?? 0}
+                  count={overlayTimelineCount}
                 />
                 <TabButton
                   active={activeTab === "images"}
@@ -665,6 +673,7 @@ export function EditingPage() {
                 {activeTab === "transcript" && (
                   <TranscriptTabContent
                     transcript={transcript}
+                    analysis={analysis}
                     hasTranscript={hasTranscript}
                     transcribing={transcribing}
                     transcriptionBusy={transcriptionBusy}
@@ -683,6 +692,7 @@ export function EditingPage() {
 
         <PromptPanel
           suggestion={selectedSuggestion}
+          selectedAsset={selectedAsset}
           promptText={displayPrompt}
           isPromptEdited={isPromptEdited}
           onPromptChange={handlePromptChange}
@@ -916,7 +926,7 @@ function OverlaysTabContent({
   }
 
   return (
-    <div className="flex flex-col gap-4 flex-1 min-h-0">
+    <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-hidden">
       <button
         type="button"
         disabled={analyzing}
@@ -931,10 +941,19 @@ function OverlaysTabContent({
       )}
 
       {hasAnalysis && analysis && (
-        <>
-          {(analysis.contentBounds || (analysis.assetPlacements?.length ?? 0) > 0) && (
-            <AnalysisMetaPanel analysis={analysis} />
-          )}
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          {analysis.contentBounds ? (
+            <p className="text-xs text-textMuted flex-shrink-0 mb-3">
+              Episode content:{" "}
+              {formatTimeRangeMs(
+                analysis.contentBounds.contentStartMs,
+                analysis.contentBounds.contentEndMs,
+              )}
+              {analysis.contentBounds.videoDurationMs
+                ? ` · file duration ${formatTimeRangeMs(0, analysis.contentBounds.videoDurationMs)}`
+                : null}
+            </p>
+          ) : null}
           <OverlaySuggestionsTable
             analysis={analysis}
             generatedSuggestionIds={generatedSuggestionIds}
@@ -945,7 +964,7 @@ function OverlaysTabContent({
             onToggleApproval={onToggleApproval}
             onOpenLightbox={onOpenLightbox}
           />
-        </>
+        </div>
       )}
 
       {!hasAnalysis && !analyzing && (
@@ -958,46 +977,24 @@ function OverlaysTabContent({
   );
 }
 
-function AnalysisMetaPanel({ analysis }: { analysis: TranscriptAnalysis }) {
-  const bounds = analysis.contentBounds;
-  const assets = analysis.assetPlacements ?? [];
+type OverlayTimelineRow =
+  | { kind: "suggestion"; suggestion: OverlaySuggestion; sortMs: number }
+  | { kind: "asset"; asset: AssetPlacement; sortMs: number };
 
-  return (
-    <section className="rounded-xl border border-border bg-surface/80 p-4 space-y-3 flex-shrink-0">
-      {bounds ? (
-        <div>
-          <h4 className="text-sm font-semibold text-white">Episode content window</h4>
-          <p className="text-sm text-textMuted mt-1">
-            Actual content: {formatTimeRangeMs(bounds.contentStartMs, bounds.contentEndMs)}
-            {bounds.videoDurationMs
-              ? ` · file duration ${formatTimeRangeMs(0, bounds.videoDurationMs)}`
-              : null}
-          </p>
-          <p className="text-xs text-textMuted mt-1">{bounds.rationale}</p>
-        </div>
-      ) : null}
-      {assets.length > 0 ? (
-        <div>
-          <h4 className="text-sm font-semibold text-white">Asset placements ({assets.length})</h4>
-          <ul className="mt-2 space-y-2">
-            {assets.map((asset) => (
-              <li
-                key={asset.id}
-                className="text-sm text-textMuted border border-border rounded-lg px-3 py-2 bg-background/60"
-              >
-                <strong className="text-white">{asset.assetFileName}</strong>
-                {" · "}
-                {formatTimeRangeMs(asset.startMs, asset.startMs + asset.durationMs)}
-                {asset.triggerWord ? ` · trigger “${asset.triggerWord}”` : ""}
-                {asset.verified ? " · verified" : " · rejected"}
-                <span className="block text-xs mt-1">{asset.rationale}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </section>
-  );
+function buildOverlayTimelineRows(analysis: TranscriptAnalysis): OverlayTimelineRow[] {
+  const rows: OverlayTimelineRow[] = [
+    ...analysis.suggestions.map((suggestion) => ({
+      kind: "suggestion" as const,
+      suggestion,
+      sortMs: suggestion.startMs ?? 0,
+    })),
+    ...(analysis.assetPlacements ?? []).map((asset) => ({
+      kind: "asset" as const,
+      asset,
+      sortMs: asset.startMs,
+    })),
+  ];
+  return rows.sort((a, b) => a.sortMs - b.sortMs);
 }
 
 function OverlaySuggestionsTable({
@@ -1019,6 +1016,9 @@ function OverlaySuggestionsTable({
   onToggleApproval: (id: string) => void;
   onOpenLightbox: (suggestion: OverlaySuggestion, imageUrl?: string) => void;
 }) {
+  const timelineRows = useMemo(() => buildOverlayTimelineRows(analysis), [analysis]);
+  const assetCount = analysis.assetPlacements?.length ?? 0;
+
   const stats = useMemo(() => {
     let approved = 0;
     let generated = 0;
@@ -1042,46 +1042,66 @@ function OverlaySuggestionsTable({
               <th className="p-3 w-10" aria-label="Select" />
               <th className="p-3 font-medium w-32">Time</th>
               <th className="p-3 font-medium min-w-[12rem]">Excerpt</th>
-              <th className="p-3 font-medium w-32">Image</th>
+              <th className="p-3 font-medium w-32">Type</th>
               <th className="p-3 font-medium w-28">Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {analysis.suggestions.map((s) => (
-              <SuggestionRow
-                key={s.id}
-                suggestion={s}
-                highlight={selectedSuggestionId === s.id}
-                hasImage={generatedSuggestionIds.has(s.id)}
-                displayUrl={displayUrls[s.id]}
-                status={overlayRowStatus(s.id, generatedSuggestionIds.has(s.id), approvedSuggestionIds)}
-                checked={approvedSuggestionIds.has(s.id)}
-                onToggleChecked={() => onToggleApproval(s.id)}
-                onSelect={() => onSelectSuggestion(s.id)}
-                onToggleApproval={() => onToggleApproval(s.id)}
-                onOpenLightbox={(url) => onOpenLightbox(s, url)}
-              />
-            ))}
+            {timelineRows.map((row) =>
+              row.kind === "suggestion" ? (
+                <SuggestionRow
+                  key={row.suggestion.id}
+                  suggestion={row.suggestion}
+                  highlight={selectedSuggestionId === row.suggestion.id}
+                  hasImage={generatedSuggestionIds.has(row.suggestion.id)}
+                  displayUrl={displayUrls[row.suggestion.id]}
+                  status={overlayRowStatus(
+                    row.suggestion.id,
+                    generatedSuggestionIds.has(row.suggestion.id),
+                    approvedSuggestionIds,
+                  )}
+                  checked={approvedSuggestionIds.has(row.suggestion.id)}
+                  onToggleChecked={() => onToggleApproval(row.suggestion.id)}
+                  onSelect={() => onSelectSuggestion(row.suggestion.id)}
+                  onToggleApproval={() => onToggleApproval(row.suggestion.id)}
+                  onOpenLightbox={(url) => onOpenLightbox(row.suggestion, url)}
+                />
+              ) : (
+                <AssetRow
+                  key={row.asset.id}
+                  asset={row.asset}
+                  highlight={selectedSuggestionId === row.asset.id}
+                  onSelect={() => onSelectSuggestion(row.asset.id)}
+                />
+              ),
+            )}
           </tbody>
         </table>
       </div>
-      <OverlaySuggestionsFooter total={analysis.suggestions.length} stats={stats} />
+      <OverlaySuggestionsFooter
+        overlayCount={analysis.suggestions.length}
+        assetCount={assetCount}
+        stats={stats}
+      />
     </div>
   );
 }
 
 function OverlaySuggestionsFooter({
-  total,
+  overlayCount,
+  assetCount,
   stats,
 }: {
-  total: number;
+  overlayCount: number;
+  assetCount: number;
   stats: { approved: number; generated: number; pending: number };
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-border bg-[#151821] flex-shrink-0">
       <p className="text-xs text-textMuted">
-        {total} suggestions · {stats.approved} approved for images · {stats.generated} with image
-        (excluded) · {stats.pending} excluded
+        {overlayCount} overlays
+        {assetCount > 0 ? ` · ${assetCount} assets` : ""} · {stats.approved} approved for images ·{" "}
+        {stats.generated} with image (excluded) · {stats.pending} excluded
       </p>
     </div>
   );
@@ -1129,6 +1149,57 @@ function OverlayStatusBadge({
     >
       {labels[status]}
     </button>
+  );
+}
+
+function AssetRow({
+  asset,
+  highlight,
+  onSelect,
+}: {
+  asset: AssetPlacement;
+  highlight: boolean;
+  onSelect: () => void;
+}) {
+  const excerpt =
+    asset.transcriptExcerpt?.trim() ||
+    (asset.triggerWord ? `Trigger: “${asset.triggerWord}”` : asset.rationale);
+
+  return (
+    <tr
+      className={`cursor-pointer hover:bg-white hover:bg-opacity-5 ${
+        highlight ? "bg-primary bg-opacity-10" : ""
+      }`}
+      onClick={onSelect}
+    >
+      <td className="p-3 w-10" aria-hidden />
+      <td className="p-3 text-white whitespace-nowrap align-top">
+        {formatTimeRangeMs(asset.startMs, asset.startMs + asset.durationMs)}
+      </td>
+      <td className="p-3 text-textMuted align-top max-w-md">
+        <p className="text-sm font-medium text-white">{asset.assetFileName}</p>
+        <p className="text-sm leading-snug line-clamp-3 mt-1" title={excerpt}>
+          {excerptSnippet(excerpt, 220)}
+        </p>
+      </td>
+      <td className="p-3 align-top">
+        <span className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded border bg-[#8B5CF6] bg-opacity-10 text-[#C4B5FD] border-[#8B5CF6] border-opacity-30">
+          <Film size={12} />
+          Asset
+        </span>
+      </td>
+      <td className="p-3 align-top">
+        <span
+          className={`text-xs px-2 py-1 rounded border capitalize ${
+            asset.verified
+              ? "bg-success bg-opacity-20 text-success border-success border-opacity-30"
+              : "bg-white bg-opacity-5 text-textMuted border-border"
+          }`}
+        >
+          {asset.verified ? "Verified" : "Rejected"}
+        </span>
+      </td>
+    </tr>
   );
 }
 
@@ -1207,6 +1278,7 @@ function SuggestionRow({
             <ImageIcon className="text-border" size={20} />
           )}
         </button>
+        <span className="sr-only">Image overlay</span>
       </td>
       <td className="p-3" onClick={(e) => e.stopPropagation()}>
         <OverlayStatusBadge status={status} onToggle={onToggleApproval} />
@@ -1474,6 +1546,7 @@ function ImageSelectCard({
 
 function TranscriptTabContent({
   transcript,
+  analysis,
   hasTranscript,
   transcribing,
   transcriptionBusy,
@@ -1481,6 +1554,7 @@ function TranscriptTabContent({
   onTranscribe,
 }: {
   transcript: Transcript | null;
+  analysis: TranscriptAnalysis | null;
   hasTranscript: boolean;
   transcribing: boolean;
   transcriptionBusy: boolean;
@@ -1512,7 +1586,25 @@ function TranscriptTabContent({
     );
   }
   return (
-    <div className="flex flex-col gap-4 flex-1 min-h-0">
+    <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-hidden">
+      {analysis?.contentBounds ? (
+        <section className="rounded-xl border border-border bg-surface/80 p-4 flex-shrink-0">
+          <h4 className="text-sm font-semibold text-white">Episode content window</h4>
+          <p className="text-sm text-textMuted mt-1">
+            Actual content:{" "}
+            {formatTimeRangeMs(
+              analysis.contentBounds.contentStartMs,
+              analysis.contentBounds.contentEndMs,
+            )}
+            {analysis.contentBounds.videoDurationMs
+              ? ` · file duration ${formatTimeRangeMs(0, analysis.contentBounds.videoDurationMs)}`
+              : null}
+          </p>
+          <p className="text-xs text-textMuted mt-2 leading-relaxed">
+            {analysis.contentBounds.rationale}
+          </p>
+        </section>
+      ) : null}
       <p className="text-xs text-textMuted flex-shrink-0">
         {transcript.segments.length} segments
         {transcript.appliedTranscriptTimingOffsetMs != null &&
@@ -1540,6 +1632,7 @@ function TranscriptSegmentList({ transcript }: { transcript: Transcript }) {
 
 function PromptPanel({
   suggestion,
+  selectedAsset,
   promptText,
   isPromptEdited,
   onPromptChange,
@@ -1553,6 +1646,7 @@ function PromptPanel({
   onOpenLightbox,
 }: {
   suggestion: OverlaySuggestion | null;
+  selectedAsset: AssetPlacement | null;
   promptText: string;
   isPromptEdited: boolean;
   onPromptChange: (text: string) => void;
@@ -1572,9 +1666,32 @@ function PromptPanel({
   return (
     <div className="w-[260px] lg:w-[280px] xl:w-[300px] min-w-[240px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto">
       <div className="bg-surface border border-border rounded-xl flex flex-col overflow-hidden">
-        <PromptPanelHeader />
+        <PromptPanelHeader isAsset={Boolean(selectedAsset)} />
         <div className="p-5 flex-1 overflow-y-auto">
-          {suggestion ? (
+          {selectedAsset ? (
+            <>
+              <h3 className="text-textMuted text-xs font-semibold uppercase tracking-wider mb-2">
+                Asset file
+              </h3>
+              <p className="text-sm text-white mb-4">{selectedAsset.assetFileName}</p>
+              <h3 className="text-textMuted text-xs font-semibold uppercase tracking-wider mb-2">
+                Timeline
+              </h3>
+              <p className="text-sm text-textMuted mb-4">
+                {formatTimeRangeMs(selectedAsset.startMs, selectedAsset.startMs + selectedAsset.durationMs)}
+                {selectedAsset.triggerWord ? (
+                  <>
+                    <br />
+                    Trigger: “{selectedAsset.triggerWord}”
+                  </>
+                ) : null}
+              </p>
+              <h3 className="text-textMuted text-xs font-semibold uppercase tracking-wider mb-2">
+                Notes
+              </h3>
+              <p className="text-sm text-textMuted leading-relaxed">{selectedAsset.rationale}</p>
+            </>
+          ) : suggestion ? (
             <>
               <div className="flex items-center justify-between gap-2 mb-2">
                 <h3 className="text-textMuted text-xs font-semibold uppercase tracking-wider">
@@ -1678,10 +1795,12 @@ function PromptPanel({
   );
 }
 
-function PromptPanelHeader() {
+function PromptPanelHeader({ isAsset }: { isAsset?: boolean }) {
   return (
     <div className="px-5 py-3 border-b border-border bg-[#151821]">
-      <span className="text-sm font-medium text-white">Image Prompt</span>
+      <span className="text-sm font-medium text-white">
+        {isAsset ? "Asset details" : "Image Prompt"}
+      </span>
     </div>
   );
 }

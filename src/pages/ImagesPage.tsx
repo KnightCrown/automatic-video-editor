@@ -152,7 +152,7 @@ export function ImagesPage() {
         const [videoId, ids] = jobs[i];
         const video = transcribedVideos.find((v) => v.id === videoId);
         setCreateProgress(
-          `Preparing final video ${i + 1} of ${jobs.length}${video ? `: ${video.fileName}` : ""} (${ids.size} image${ids.size === 1 ? "" : "s"})…`,
+          `Refreshing asset placements and preparing final video ${i + 1} of ${jobs.length}${video ? `: ${video.fileName}` : ""} (${ids.size} image${ids.size === 1 ? "" : "s"})...`,
         );
         await prepareFinalVideoTimelineWithSelection(
           project.rootPath,

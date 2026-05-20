@@ -6,7 +6,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::pipeline::assets::{
-    list_video_assets, propose_asset_triggers, provisional_content_end_ms,
+    asset_placements_from_proposals, list_video_assets, propose_asset_triggers,
+    provisional_content_end_ms,
 };
 use crate::types::{
     AssetPlacement, EpisodeContentBounds, OverlayCandidate, OverlayPromptResult, OverlaySuggestion,
@@ -230,30 +231,7 @@ fn merge_asset_placements(
     reviews: &[OpenAiAssetReviewPayload],
 ) -> Vec<AssetPlacement> {
     if reviews.is_empty() {
-        return proposed
-            .iter()
-            .map(|p| AssetPlacement {
-                id: Uuid::new_v4().to_string(),
-                asset_file_name: p.asset_file_name.clone(),
-                trigger_word: p.trigger_word.clone(),
-                placement_kind: p.placement_kind.clone(),
-                timeline_mode: p.timeline_mode.clone(),
-                start_ms: p.start_ms,
-                duration_ms: p.duration_ms,
-                transcript_excerpt: Some(p.transcript_excerpt.clone()),
-                verified: true,
-                rationale: "Accepted from transcript word match.".to_string(),
-                track_index: if p.timeline_mode == "insert"
-                    || p.placement_kind == "intro"
-                    || p.placement_kind == "outro"
-                {
-                    2
-                } else {
-                    1
-                },
-                full_screen: p.full_screen,
-            })
-            .collect();
+        return asset_placements_from_proposals(proposed);
     }
 
     reviews

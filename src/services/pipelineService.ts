@@ -303,7 +303,7 @@ export async function recordFinalVideoExport(
   });
 }
 
-/** Rebuild timeline from current analysis + image manifest and persist it. */
+/** Refresh prompt-driven asset placements, then rebuild timeline from current analysis + image manifest. */
 export async function prepareFinalVideoTimeline(
   rootPath: string,
   videoId: string,
