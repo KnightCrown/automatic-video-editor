@@ -163,6 +163,7 @@ export function FinalVideoPage() {
       readyVideos.map((v) => {
         const clips = timelineByVideo[v.id]?.clips ?? [];
         const videoClips = timelineByVideo[v.id]?.videoClips ?? [];
+        const timeline = timelineByVideo[v.id];
         const imageCount = manifestByVideo[v.id]?.images.length ?? 0;
         const exportStatus = getSession(v.id).status;
         const exportSubtitle =
@@ -181,6 +182,9 @@ export function FinalVideoPage() {
               rootPath={project!.rootPath}
               clips={clips}
               videoClips={videoClips}
+              contentStartMs={timeline?.contentStartMs}
+              contentEndMs={timeline?.contentEndMs}
+              enablePreviewKeyboard={!editingVideo}
               imageCount={imageCount}
               ffmpegOk={ffmpegOk}
               onRebuildTimeline={() => handleRebuildTimeline(v.id)}
@@ -197,6 +201,7 @@ export function FinalVideoPage() {
       ffmpegOk,
       handleRebuildTimeline,
       getSession,
+      editingVideo,
     ],
   );
 
@@ -269,6 +274,8 @@ export function FinalVideoPage() {
               ? timelineByVideo[editingVideo.id]!.videoClips ?? []
               : []
           }
+          contentStartMs={timelineByVideo[editingVideo.id]?.contentStartMs}
+          contentEndMs={timelineByVideo[editingVideo.id]?.contentEndMs}
           onClose={() => setEditingVideo(null)}
         />
       ) : null}
@@ -281,6 +288,9 @@ function FinalVideoEpisodeBody({
   rootPath,
   clips,
   videoClips,
+  contentStartMs,
+  contentEndMs,
+  enablePreviewKeyboard = true,
   imageCount,
   ffmpegOk,
   onRebuildTimeline,
@@ -290,6 +300,9 @@ function FinalVideoEpisodeBody({
   rootPath: string;
   clips: VideoOverlayClip[];
   videoClips: TimelineVideoClip[];
+  contentStartMs?: number;
+  contentEndMs?: number;
+  enablePreviewKeyboard?: boolean;
   imageCount: number;
   ffmpegOk: boolean | null;
   onRebuildTimeline: () => Promise<FinalVideoTimeline | null>;
@@ -382,6 +395,10 @@ function FinalVideoEpisodeBody({
         videoPath={video.path}
         rootPath={rootPath}
         clips={clips}
+        videoClips={videoClips}
+        contentStartMs={contentStartMs}
+        contentEndMs={contentEndMs}
+        enableKeyboardShortcuts={enablePreviewKeyboard}
       />
 
       {clips.length > 0 ? (

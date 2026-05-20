@@ -68,6 +68,29 @@ fn probe_video_dimensions(video_path: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+fn probe_has_audio_stream(video_path: &Path) -> bool {
+    let Ok(ffprobe) = crate::audio::ffmpeg::resolve_ffprobe_executable() else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            video_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+}
+
 fn ms_to_sec(ms: u64) -> f64 {
     ms as f64 / 1000.0
 }
@@ -126,11 +149,10 @@ fn normalized_insert_at_ms(
     content_start_ms: u64,
     content_end_ms: u64,
 ) -> u64 {
-    if matches!(clip.placement_kind.as_deref(), Some("intro")) || clip.start_ms <= content_start_ms
-    {
+    if clip.start_ms <= content_start_ms {
         return content_start_ms;
     }
-    if matches!(clip.placement_kind.as_deref(), Some("outro")) || clip.start_ms >= content_end_ms {
+    if clip.start_ms >= content_end_ms {
         return content_end_ms;
     }
     clip.start_ms.clamp(content_start_ms, content_end_ms)
@@ -280,14 +302,7 @@ fn render_concatenated_base_with_inserts(
             )
         })
         .collect();
-    inserts.sort_by_key(|(insert_at, clip, _)| {
-        let kind_rank = match clip.placement_kind.as_deref() {
-            Some("intro") => 0,
-            Some("outro") => 2,
-            _ => 1,
-        };
-        (*insert_at, kind_rank, clip.track_index)
-    });
+    inserts.sort_by_key(|(insert_at, clip, _)| (*insert_at, clip.track_index));
 
     let mut segment_paths = Vec::new();
     let mut offsets = Vec::new();
@@ -551,6 +566,50 @@ fn build_extra_video_video_chain(
     parts
 }
 
+fn extra_video_volume(clip: &TimelineVideoClip) -> f64 {
+    (clip.volume_pct.unwrap_or(100.0) / 100.0).clamp(0.0, 2.0)
+}
+
+fn build_extra_video_audio_chain(
+    video_clips: &[TimelineVideoClip],
+    extra_input_start: usize,
+    extra_has_audio: &[bool],
+) -> Option<String> {
+    let audio_clips: Vec<(usize, &TimelineVideoClip)> = video_clips
+        .iter()
+        .enumerate()
+        .filter(|(i, clip)| {
+            extra_has_audio.get(*i).copied().unwrap_or(false) && extra_video_volume(clip) > 0.0
+        })
+        .collect();
+    if audio_clips.is_empty() {
+        return None;
+    }
+
+    let mut parts = vec!["[0:a]aresample=48000,aformat=channel_layouts=stereo[abase]".to_string()];
+    let mut inputs = vec!["[abase]".to_string()];
+
+    for (audio_i, (clip_i, clip)) in audio_clips.iter().enumerate() {
+        let input_idx = extra_input_start + *clip_i;
+        let trim_start = ms_to_sec(clip.trim_start_ms.unwrap_or(0));
+        let duration = ms_to_sec(clip.duration_ms).max(0.001);
+        let delay = clip.start_ms;
+        let volume = extra_video_volume(clip);
+        let label = format!("aud{audio_i}");
+        parts.push(format!(
+            "[{input_idx}:a]atrim=start={trim_start}:duration={duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={volume:.3},adelay={delay}|{delay},apad[{label}]"
+        ));
+        inputs.push(format!("[{label}]"));
+    }
+
+    parts.push(format!(
+        "{}amix=inputs={}:duration=first:dropout_transition=0[aout]",
+        inputs.join(""),
+        inputs.len()
+    ));
+    Some(parts.join(";"))
+}
+
 fn build_full_cpu_filter_complex(
     overlay_clips: &[VideoOverlayClip],
     video_clips: &[TimelineVideoClip],
@@ -558,11 +617,8 @@ fn build_full_cpu_filter_complex(
     extra_input_start: usize,
     video_w: u32,
     video_h: u32,
+    extra_has_audio: &[bool],
 ) -> String {
-    if overlay_clips.is_empty() && video_clips.is_empty() {
-        return "[0:v]copy[vout]".to_string();
-    }
-
     let mut parts: Vec<String> = Vec::new();
 
     let layer_after_overlays = if overlay_clips.is_empty() {
@@ -592,6 +648,16 @@ fn build_full_cpu_filter_complex(
             &layer_after_overlays,
             "vout",
         ));
+    }
+
+    if let Some(audio_chain) =
+        build_extra_video_audio_chain(video_clips, extra_input_start, extra_has_audio)
+    {
+        parts.push(audio_chain);
+    }
+
+    if parts.is_empty() {
+        return "[0:v]copy[vout]".to_string();
     }
 
     parts.join(";")
@@ -656,6 +722,17 @@ fn audio_args(copy_safe: bool) -> Vec<String> {
     }
 }
 
+fn filtered_audio_args() -> Vec<String> {
+    vec![
+        "-map".into(),
+        "[aout]".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "192k".into(),
+    ]
+}
+
 fn push_overlay_inputs(args: &mut Vec<String>, image_paths: &[PathBuf]) {
     for p in image_paths {
         args.push("-loop".into());
@@ -701,6 +778,11 @@ fn build_export_runs(
     let overlay_input_start = 1usize;
     let extra_input_start = 1 + image_paths.len();
     let use_filters = needs_filter_complex(clips, video_clips);
+    let extra_has_audio: Vec<bool> = extra_video_paths
+        .iter()
+        .map(|path| probe_has_audio_stream(path))
+        .collect();
+    let has_extra_audio = extra_has_audio.iter().any(|has_audio| *has_audio);
 
     let hw_encoder = if encoder == VideoExportEncoderKind::Software {
         None
@@ -764,12 +846,17 @@ fn build_export_runs(
                     extra_input_start,
                     video_w,
                     video_h,
+                    &extra_has_audio,
                 );
                 args.push("-filter_complex".into());
                 args.push(video_filter);
                 args.push("-map".into());
                 args.push("[vout]".into());
-                args.extend(audio_args(audio_copy));
+                if has_extra_audio {
+                    args.extend(filtered_audio_args());
+                } else {
+                    args.extend(audio_args(audio_copy));
+                }
                 args.extend(build_video_encoder_args(hw, fast));
                 args.push("-shortest".into());
                 args.push(output_path.to_string());
@@ -804,12 +891,17 @@ fn build_export_runs(
             extra_input_start,
             video_w,
             video_h,
+            &extra_has_audio,
         );
         args.push("-filter_complex".into());
         args.push(video_filter);
         args.push("-map".into());
         args.push("[vout]".into());
-        args.extend(audio_args(audio_copy));
+        if has_extra_audio {
+            args.extend(filtered_audio_args());
+        } else {
+            args.extend(audio_args(audio_copy));
+        }
         args.extend(build_video_encoder_args(
             VideoExportEncoderKind::Software,
             fast,

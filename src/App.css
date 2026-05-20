@@ -1470,6 +1470,16 @@ body {
   width: 100% !important;
 }
 
+.video-timeline-editor.fit-width.fit-width-zoomable .video-timeline-scroll {
+  overflow-x: auto;
+}
+
+.video-timeline-editor.fit-width.fit-width-zoomable .video-timeline-ruler,
+.video-timeline-editor.fit-width.fit-width-zoomable .video-timeline-track-area {
+  width: auto !important;
+  min-width: 100%;
+}
+
 .timeline-base-video-clip {
   position: absolute;
   left: 0;
@@ -1658,7 +1668,7 @@ body {
 }
 
 .timeline-audio-wave span {
-  flex: 1 1 2px;
+  flex: 0 0 auto;
   min-width: 1px;
   max-width: 8px;
   border-radius: 999px;

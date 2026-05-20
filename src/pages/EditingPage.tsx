@@ -978,21 +978,114 @@ function OverlaysTabContent({
 }
 
 type OverlayTimelineRow =
-  | { kind: "suggestion"; suggestion: OverlaySuggestion; sortMs: number }
-  | { kind: "asset"; asset: AssetPlacement; sortMs: number };
+  | {
+      kind: "suggestion";
+      suggestion: OverlaySuggestion;
+      sortMs: number;
+      displayStartMs?: number;
+      displayEndMs?: number;
+    }
+  | {
+      kind: "asset";
+      asset: AssetPlacement;
+      sortMs: number;
+      displayStartMs: number;
+      displayEndMs: number;
+    };
+
+type InsertDisplayPlan = {
+  contentStartMs: number;
+  inserts: {
+    assetId: string;
+    insertAtMs: number;
+    finalStartMs: number;
+    finalEndMs: number;
+    durationMs: number;
+  }[];
+};
+
+function isInsertAsset(asset: AssetPlacement): boolean {
+  return (
+    asset.timelineMode === "insert" ||
+    asset.placementKind === "intro" ||
+    asset.placementKind === "outro"
+  );
+}
+
+function assetInsertAtMs(asset: AssetPlacement, analysis: TranscriptAnalysis): number {
+  const contentStart = analysis.contentBounds?.contentStartMs ?? 0;
+  const contentEnd = analysis.contentBounds?.contentEndMs ?? asset.startMs;
+  if (asset.placementKind === "intro" || asset.startMs <= contentStart) return contentStart;
+  if (asset.placementKind === "outro" || asset.startMs >= contentEnd) return contentEnd;
+  return Math.max(contentStart, Math.min(contentEnd, asset.startMs));
+}
+
+function buildInsertDisplayPlan(analysis: TranscriptAnalysis): InsertDisplayPlan {
+  const contentStartMs = analysis.contentBounds?.contentStartMs ?? 0;
+  const inserts = (analysis.assetPlacements ?? [])
+    .filter(isInsertAsset)
+    .map((asset) => ({
+      asset,
+      insertAtMs: assetInsertAtMs(asset, analysis),
+    }))
+    .sort((a, b) => {
+      return a.insertAtMs - b.insertAtMs || a.asset.trackIndex - b.asset.trackIndex;
+    });
+
+  let insertedBeforeMs = 0;
+  return {
+    contentStartMs,
+    inserts: inserts.map(({ asset, insertAtMs }) => {
+      const finalStartMs = Math.max(0, insertAtMs - contentStartMs) + insertedBeforeMs;
+      insertedBeforeMs += asset.durationMs;
+      return {
+        assetId: asset.id,
+        insertAtMs,
+        finalStartMs,
+        finalEndMs: finalStartMs + asset.durationMs,
+        durationMs: asset.durationMs,
+      };
+    }),
+  };
+}
+
+function sourceTimeToFinalTime(ms: number | undefined, plan: InsertDisplayPlan): number | undefined {
+  if (ms == null) return undefined;
+  const sourceMs = Math.max(plan.contentStartMs, ms);
+  const insertedBefore = plan.inserts
+    .filter((insert) => insert.insertAtMs <= sourceMs)
+    .reduce((sum, insert) => sum + insert.durationMs, 0);
+  return Math.max(0, sourceMs - plan.contentStartMs) + insertedBefore;
+}
 
 function buildOverlayTimelineRows(analysis: TranscriptAnalysis): OverlayTimelineRow[] {
+  const insertPlan = buildInsertDisplayPlan(analysis);
+  const insertByAssetId = new Map(insertPlan.inserts.map((insert) => [insert.assetId, insert]));
   const rows: OverlayTimelineRow[] = [
-    ...analysis.suggestions.map((suggestion) => ({
-      kind: "suggestion" as const,
-      suggestion,
-      sortMs: suggestion.startMs ?? 0,
-    })),
-    ...(analysis.assetPlacements ?? []).map((asset) => ({
-      kind: "asset" as const,
-      asset,
-      sortMs: asset.startMs,
-    })),
+    ...analysis.suggestions.map((suggestion) => {
+      const displayStartMs = sourceTimeToFinalTime(suggestion.startMs, insertPlan);
+      const displayEndMs = sourceTimeToFinalTime(suggestion.endMs, insertPlan);
+      return {
+        kind: "suggestion" as const,
+        suggestion,
+        sortMs: displayStartMs ?? suggestion.startMs ?? 0,
+        displayStartMs,
+        displayEndMs,
+      };
+    }),
+    ...(analysis.assetPlacements ?? []).map((asset) => {
+      const inserted = insertByAssetId.get(asset.id);
+      const displayStartMs =
+        inserted?.finalStartMs ?? sourceTimeToFinalTime(asset.startMs, insertPlan) ?? asset.startMs;
+      const displayEndMs = inserted?.finalEndMs ?? displayStartMs + asset.durationMs;
+      return {
+        kind: "asset" as const,
+        asset,
+        sortMs: displayStartMs,
+        displayStartMs,
+        displayEndMs,
+      };
+    }),
   ];
   return rows.sort((a, b) => a.sortMs - b.sortMs);
 }
@@ -1040,7 +1133,7 @@ function OverlaySuggestionsTable({
           <thead className="bg-[#151821] text-textMuted border-b border-border sticky top-0 z-10">
             <tr>
               <th className="p-3 w-10" aria-label="Select" />
-              <th className="p-3 font-medium w-32">Time</th>
+              <th className="p-3 font-medium w-32">Final Time</th>
               <th className="p-3 font-medium min-w-[12rem]">Excerpt</th>
               <th className="p-3 font-medium w-32">Type</th>
               <th className="p-3 font-medium w-28">Status</th>
@@ -1052,6 +1145,8 @@ function OverlaySuggestionsTable({
                 <SuggestionRow
                   key={row.suggestion.id}
                   suggestion={row.suggestion}
+                  displayStartMs={row.displayStartMs}
+                  displayEndMs={row.displayEndMs}
                   highlight={selectedSuggestionId === row.suggestion.id}
                   hasImage={generatedSuggestionIds.has(row.suggestion.id)}
                   displayUrl={displayUrls[row.suggestion.id]}
@@ -1070,6 +1165,8 @@ function OverlaySuggestionsTable({
                 <AssetRow
                   key={row.asset.id}
                   asset={row.asset}
+                  displayStartMs={row.displayStartMs}
+                  displayEndMs={row.displayEndMs}
                   highlight={selectedSuggestionId === row.asset.id}
                   onSelect={() => onSelectSuggestion(row.asset.id)}
                 />
@@ -1154,10 +1251,14 @@ function OverlayStatusBadge({
 
 function AssetRow({
   asset,
+  displayStartMs,
+  displayEndMs,
   highlight,
   onSelect,
 }: {
   asset: AssetPlacement;
+  displayStartMs: number;
+  displayEndMs: number;
   highlight: boolean;
   onSelect: () => void;
 }) {
@@ -1174,7 +1275,11 @@ function AssetRow({
     >
       <td className="p-3 w-10" aria-hidden />
       <td className="p-3 text-white whitespace-nowrap align-top">
-        {formatTimeRangeMs(asset.startMs, asset.startMs + asset.durationMs)}
+        {formatTimeRangeMs(displayStartMs, displayEndMs)}
+        <br />
+        <span className="text-xs text-textMuted">
+          {isInsertAsset(asset) ? "Final insert" : "Final"}
+        </span>
       </td>
       <td className="p-3 text-textMuted align-top max-w-md">
         <p className="text-sm font-medium text-white">{asset.assetFileName}</p>
@@ -1205,6 +1310,8 @@ function AssetRow({
 
 function SuggestionRow({
   suggestion,
+  displayStartMs,
+  displayEndMs,
   highlight,
   hasImage,
   displayUrl,
@@ -1216,6 +1323,8 @@ function SuggestionRow({
   onOpenLightbox,
 }: {
   suggestion: OverlaySuggestion;
+  displayStartMs?: number;
+  displayEndMs?: number;
   highlight: boolean;
   hasImage: boolean;
   displayUrl?: string;
@@ -1247,7 +1356,7 @@ function SuggestionRow({
         />
       </td>
       <td className="p-3 text-white whitespace-nowrap align-top">
-        {formatTimeRangeMs(suggestion.startMs, suggestion.endMs)}
+        {formatTimeRangeMs(displayStartMs ?? suggestion.startMs, displayEndMs ?? suggestion.endMs)}
         <br />
         <span className="text-xs text-textMuted">
           {formatIdealDisplayMs(suggestion.idealDisplayMs)}

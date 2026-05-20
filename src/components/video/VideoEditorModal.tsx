@@ -46,6 +46,11 @@ import {
   normalizeVideoClip,
   videoClipEndMs,
 } from "../../utils/timelineVideoClips";
+import {
+  buildTimelineInsertPlan,
+  finalToSourceMs,
+  sourceToFinalMs,
+} from "../../utils/timelineInserts";
 import { VIDEO_FILE_DIALOG_FILTER } from "../../utils/videoExtensions";
 
 const TIME_STEP_MS = 500;
@@ -55,6 +60,8 @@ type Props = {
   rootPath: string;
   initialClips: VideoOverlayClip[];
   initialVideoClips?: TimelineVideoClip[];
+  contentStartMs?: number;
+  contentEndMs?: number;
   onSave: (timeline: Pick<FinalVideoTimeline, "clips" | "videoClips">) => Promise<void>;
   onClose: () => void;
   isQueued?: boolean;
@@ -97,6 +104,8 @@ export function VideoEditorModal({
   rootPath,
   initialClips,
   initialVideoClips = [],
+  contentStartMs,
+  contentEndMs,
   onSave,
   onClose,
   isQueued = false,
@@ -144,11 +153,19 @@ export function VideoEditorModal({
     setVideoClips(nextVideoClips);
     setEmptyTrackIndices([]);
     setSelected(first ? { kind: "overlay", id: first.suggestionId } : null);
-    setCurrentMs(first?.startMs ?? 0);
+    const plan = buildTimelineInsertPlan(
+      nextVideoClips,
+      contentStartMs ?? 0,
+      Math.max((contentStartMs ?? 0) + 1, contentEndMs ?? durationMs),
+    );
+    const initialFinalMs = first
+      ? sourceToFinalMs(first.startMs, plan.contentStartMs, plan.insertOffsets)
+      : 0;
+    setCurrentMs(initialFinalMs);
     window.setTimeout(() => {
-      if (first) previewRef.current?.seekToMs(first.startMs);
+      if (first) previewRef.current?.seekToMs(initialFinalMs);
     }, 0);
-  }, [video.id, initialClips, initialVideoClips]);
+  }, [video.id, initialClips, initialVideoClips, contentStartMs, contentEndMs, durationMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,6 +182,22 @@ export function VideoEditorModal({
       cancelled = true;
     };
   }, [clips, rootPath]);
+
+  const insertPlan = useMemo(() => {
+    const start = contentStartMs ?? 0;
+    const end = Math.max(start + 1, contentEndMs ?? durationMs);
+    return buildTimelineInsertPlan(videoClips, start, end);
+  }, [contentEndMs, contentStartMs, durationMs, videoClips]);
+
+  const toFinalMs = useCallback(
+    (sourceMs: number) => sourceToFinalMs(sourceMs, insertPlan.contentStartMs, insertPlan.insertOffsets),
+    [insertPlan.contentStartMs, insertPlan.insertOffsets],
+  );
+
+  const toSourceMs = useCallback(
+    (finalMs: number) => finalToSourceMs(finalMs, insertPlan.contentStartMs, insertPlan.insertOffsets),
+    [insertPlan.contentStartMs, insertPlan.insertOffsets],
+  );
 
   const safeDurationMs = useMemo(() => {
     const overlayMax = clips.reduce((max, clip) => Math.max(max, clipEndMs(clip)), 0);
@@ -252,9 +285,9 @@ export function VideoEditorModal({
         return;
       }
       setSelected({ kind: "overlay", id: clip.suggestionId });
-      handleSeek(clip.startMs);
+      handleSeek(toFinalMs(clip.startMs));
     },
-    [handleSeek],
+    [handleSeek, toFinalMs],
   );
 
   const handleOverlayListPointerDown = useCallback(
@@ -458,7 +491,7 @@ export function VideoEditorModal({
       const clip: TimelineVideoClip = {
         ...normalizeVideoClip(imported),
         trackIndex: nextTrackIndex,
-        startMs: currentMs,
+        startMs: toSourceMs(currentMs),
         durationMs: Math.min(imported.sourceDurationMs, safeDurationMs - currentMs),
       };
       setVideoClips((current) => [...current, clip]);
@@ -467,21 +500,21 @@ export function VideoEditorModal({
     } catch (err) {
       console.error("Failed to import timeline video:", err);
     }
-  }, [currentMs, emptyTrackIndices, rootPath, safeDurationMs, video.id, videoClips]);
+  }, [currentMs, emptyTrackIndices, rootPath, safeDurationMs, toSourceMs, video.id, videoClips]);
 
   const handleConfirmAiOverlay = useCallback(async () => {
     setShowAiOverlayConfirm(false);
     setAiOverlayError(null);
     setAddingAiOverlay(true);
     try {
-      const result = await generatePlayheadAiOverlay(rootPath, video.id, currentMs);
+      const result = await generatePlayheadAiOverlay(rootPath, video.id, toSourceMs(currentMs));
       const newClip = normalizeClip(result.clip);
       const nextClips = [...clips, newClip];
       setClips(nextClips);
       const url = await getOverlayImageDisplayUrl(rootPath, newClip.imageRelativePath);
       setImageUrls((current) => ({ ...current, [newClip.suggestionId]: url }));
       setSelected({ kind: "overlay", id: newClip.suggestionId });
-      handleSeek(newClip.startMs);
+      handleSeek(toFinalMs(newClip.startMs));
       setSaving(true);
       try {
         await onSave({ clips: nextClips, videoClips });
@@ -495,7 +528,7 @@ export function VideoEditorModal({
     } finally {
       setAddingAiOverlay(false);
     }
-  }, [clips, currentMs, handleSeek, onSave, rootPath, video.id, videoClips]);
+  }, [clips, currentMs, handleSeek, onSave, rootPath, toFinalMs, toSourceMs, video.id, videoClips]);
 
   const estimatedMb = estimateFileSizeMb(safeDurationMs, clips.length, quality);
 
@@ -551,6 +584,10 @@ export function VideoEditorModal({
               videoPath={video.path}
               rootPath={rootPath}
               clips={clips}
+              videoClips={videoClips}
+              contentStartMs={contentStartMs}
+              contentEndMs={contentEndMs}
+              enableKeyboardShortcuts
               large
               className="video-editor-preview"
               onTimeUpdate={setCurrentMs}
@@ -573,6 +610,8 @@ export function VideoEditorModal({
               baseVideoLabel={video.fileName}
               imageUrls={imageUrls}
               audioWaveform={audioWaveform}
+              contentStartMs={contentStartMs}
+              contentEndMs={contentEndMs}
               fitToWidth
               onClipsChange={setClips}
               onVideoClipsChange={handleVideoClipsChange}
@@ -631,7 +670,8 @@ export function VideoEditorModal({
                     <div className="video-overlay-card-meta">
                       <strong>{clip.title}</strong>
                       <span>
-                        {formatTimeMs(clip.startMs)} - {formatTimeMs(clipEndMs(clip))}
+                        {formatTimeMs(toFinalMs(clip.startMs))} -{" "}
+                        {formatTimeMs(toFinalMs(clip.startMs) + clip.durationMs)}
                       </span>
                     </div>
                   </div>

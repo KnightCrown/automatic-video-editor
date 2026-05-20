@@ -170,8 +170,8 @@ fn context_window_for_asset(ctx: &str, asset_name: &str) -> String {
     let Some(idx) = idx else {
         return ctx.to_string();
     };
-    let start = floor_char_boundary(ctx, idx.saturating_sub(900));
-    let end = ceil_char_boundary(ctx, (idx + asset_name.len() + 900).min(ctx.len()));
+    let start = floor_char_boundary(ctx, idx.saturating_sub(550));
+    let end = ceil_char_boundary(ctx, (idx + asset_name.len() + 550).min(ctx.len()));
     ctx[start..end].to_string()
 }
 
@@ -250,10 +250,12 @@ fn extract_trigger_phrases_for_asset(ctx: &str, asset_name: &str) -> Vec<String>
     };
 
     let mut phrases = Vec::new();
-    for quoted in quoted_phrases_before_asset(ctx, asset_idx)
+    let quote_window_start = floor_char_boundary(ctx, asset_idx.saturating_sub(550));
+    let quote_window = &ctx[quote_window_start..asset_idx];
+    for quoted in quoted_phrases_before_asset(quote_window, quote_window.len())
         .into_iter()
         .rev()
-        .take(2)
+        .take(1)
     {
         phrases.extend(phrase_candidates(&quoted));
     }
@@ -388,6 +390,10 @@ fn append_trigger_proposals(
     asset_duration_ms: u64,
     video_duration_ms: u64,
 ) {
+    if hits.is_empty() {
+        return;
+    }
+
     let hits = if rule.prefer_late {
         let cutoff = video_duration_ms.saturating_mul(60) / 100;
         let late: Vec<_> = hits

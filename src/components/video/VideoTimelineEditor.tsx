@@ -10,6 +10,14 @@ import {
 import { Eye, Film, Music2, Plus, Scissors, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import type { AudioWaveform, TimelineVideoClip, VideoOverlayClip } from "../../types/pipeline";
 import { formatTimeMs } from "../../utils/overlayClips";
+import {
+  buildBaseVideoSegments,
+  buildTimelineInsertPlan,
+  clipFinalStartMs,
+  finalToSourceMs,
+  isInsertClip,
+  sourceToFinalMs,
+} from "../../utils/timelineInserts";
 import { videoClipEndMs } from "../../utils/timelineVideoClips";
 
 const MIN_DURATION_MS = 500;
@@ -59,6 +67,8 @@ type Props = {
   baseVideoLabel: string;
   imageUrls?: Record<string, string>;
   audioWaveform?: AudioWaveform | null;
+  contentStartMs?: number;
+  contentEndMs?: number;
   onClipsChange: (clips: VideoOverlayClip[]) => void;
   onVideoClipsChange: (clips: TimelineVideoClip[]) => void;
   onSelect: (selection: TimelineEditorSelection | null) => void;
@@ -120,6 +130,8 @@ export function VideoTimelineEditor({
   baseVideoLabel,
   imageUrls = {},
   audioWaveform = null,
+  contentStartMs,
+  contentEndMs,
   onClipsChange,
   onVideoClipsChange,
   onSelect,
@@ -168,6 +180,53 @@ export function VideoTimelineEditor({
     return () => ro.disconnect();
   }, []);
 
+  const insertPlan = useMemo(() => {
+    const start = contentStartMs ?? 0;
+    const end = Math.max(start + 1, contentEndMs ?? durationMs);
+    return buildTimelineInsertPlan(videoClips, start, end);
+  }, [contentEndMs, contentStartMs, durationMs, videoClips]);
+
+  const baseVideoSegments = useMemo(
+    () =>
+      buildBaseVideoSegments(
+        insertPlan.contentStartMs,
+        insertPlan.contentEndMs,
+        insertPlan.insertOffsets,
+      ),
+    [insertPlan],
+  );
+
+  const overlayDisplayTimes = useMemo(
+    () =>
+      new Map(
+        clips.map((clip) => [
+          clip.suggestionId,
+          sourceToFinalMs(clip.startMs, insertPlan.contentStartMs, insertPlan.insertOffsets),
+        ]),
+      ),
+    [clips, insertPlan.contentStartMs, insertPlan.insertOffsets],
+  );
+
+  const videoDisplayTimes = useMemo(
+    () =>
+      new Map(
+        videoClips.map((clip) => [clip.id, clipFinalStartMs(clip, insertPlan)]),
+      ),
+    [insertPlan, videoClips],
+  );
+
+  const toSourceStartMs = useCallback(
+    (finalStartMs: number, excludeClipId?: string) =>
+      finalToSourceMs(
+        finalStartMs,
+        insertPlan.contentStartMs,
+        excludeClipId
+          ? insertPlan.insertOffsets.filter((offset) => offset.clipId !== excludeClipId)
+          : insertPlan.insertOffsets,
+      ),
+    [insertPlan.contentStartMs, insertPlan.insertOffsets],
+  );
+
   useLayoutEffect(() => {
     if (!fitToWidth || durationMs <= 0) return;
     const w = trackAreaWidth;
@@ -176,9 +235,7 @@ export function VideoTimelineEditor({
     onPxPerMsChange(fit);
   }, [durationMs, fitToWidth, onPxPerMsChange, trackAreaWidth]);
 
-  const timelineWidth = fitToWidth
-    ? trackAreaWidth
-    : Math.max(durationMs * pxPerMs, trackAreaWidth);
+  const timelineWidth = Math.max(durationMs * pxPerMs, trackAreaWidth);
   const totalWidth = timelineWidth + LABEL_WIDTH_PX;
   const tickStep = tickIntervalMs(durationMs);
   const displayPeaks = useMemo(
@@ -246,14 +303,17 @@ export function VideoTimelineEditor({
             Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)),
           );
           start = snapMs(start, currentMs);
-          updateOverlayClip(drag.target.id, { startMs: start });
+          updateOverlayClip(drag.target.id, { startMs: toSourceStartMs(start) });
         } else if (drag.kind === "resize-left") {
           const delta = pxToMs(dx);
           let start = Math.max(0, drag.origStartMs + delta);
           let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs - delta);
           if (start + duration > durationMs) duration = durationMs - start;
           start = snapMs(start, currentMs);
-          updateOverlayClip(drag.target.id, { startMs: start, durationMs: duration });
+          updateOverlayClip(drag.target.id, {
+            startMs: toSourceStartMs(start),
+            durationMs: duration,
+          });
         } else if (drag.kind === "resize-right") {
           let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs + pxToMs(dx));
           let end = drag.origStartMs + duration;
@@ -278,7 +338,9 @@ export function VideoTimelineEditor({
           Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)),
         );
         start = snapMs(start, currentMs);
-        const patch: Partial<TimelineVideoClip> = { startMs: start };
+        const patch: Partial<TimelineVideoClip> = {
+          startMs: toSourceStartMs(start, isInsertClip(clip) ? clip.id : undefined),
+        };
         const targetTrack = trackIndexAtY(e.clientY);
         if (targetTrack !== null && targetTrack !== clip.trackIndex) {
           patch.trackIndex = targetTrack;
@@ -295,7 +357,7 @@ export function VideoTimelineEditor({
         if (start + duration > durationMs) duration = durationMs - start;
         start = snapMs(start, currentMs);
         updateVideoClip(drag.target.id, {
-          startMs: start,
+          startMs: toSourceStartMs(start, isInsertClip(clip) ? clip.id : undefined),
           durationMs: duration,
           trimStartMs: nextTrim,
         });
@@ -332,6 +394,7 @@ export function VideoTimelineEditor({
     updateVideoClip,
     videoClips,
     trackIndexAtY,
+    toSourceStartMs,
   ]);
 
   const deleteSelected = useCallback(() => {
@@ -386,7 +449,8 @@ export function VideoTimelineEditor({
   );
 
   const renderVideoClip = (clip: TimelineVideoClip) => {
-    const left = clip.startMs * pxPerMs;
+    const displayStartMs = videoDisplayTimes.get(clip.id) ?? clip.startMs;
+    const left = displayStartMs * pxPerMs;
     const width = Math.max(clip.durationMs * pxPerMs, 22);
     const isSelected = selectionMatches(selected, { kind: "video", id: clip.id });
     const target: TimelineEditorSelection = { kind: "video", id: clip.id };
@@ -396,7 +460,7 @@ export function VideoTimelineEditor({
         key={clip.id}
         className={`timeline-clip video-clip ${isSelected ? "selected" : ""}`}
         style={{ left, width }}
-        title={`${clip.fileName} - ${formatTimeMs(clip.startMs)}`}
+        title={`${clip.fileName} - ${formatTimeMs(displayStartMs)}`}
         onMouseDown={(e) => {
           e.stopPropagation();
           onSelect(target);
@@ -405,7 +469,7 @@ export function VideoTimelineEditor({
             target,
             startX: e.clientX,
             startY: e.clientY,
-            origStartMs: clip.startMs,
+            origStartMs: displayStartMs,
             origTrackIndex: clip.trackIndex,
           });
         }}
@@ -420,7 +484,7 @@ export function VideoTimelineEditor({
               target,
               startX: e.clientX,
               startY: e.clientY,
-              origStartMs: clip.startMs,
+              origStartMs: displayStartMs,
               origDurationMs: clip.durationMs,
               origTrimStartMs: clip.trimStartMs ?? 0,
             });
@@ -437,7 +501,7 @@ export function VideoTimelineEditor({
               target,
               startX: e.clientX,
               startY: e.clientY,
-              origStartMs: clip.startMs,
+              origStartMs: displayStartMs,
               origDurationMs: clip.durationMs,
             });
           }}
@@ -447,7 +511,7 @@ export function VideoTimelineEditor({
   };
 
   return (
-    <div className={`video-timeline-editor${fitToWidth ? " fit-width" : ""}`}>
+    <div className={`video-timeline-editor${fitToWidth ? " fit-width fit-width-zoomable" : ""}`}>
       <div className="video-timeline-toolbar">
         <div className="video-timeline-toolgroup">
           <button
@@ -516,7 +580,7 @@ export function VideoTimelineEditor({
         <div className="video-timeline-scroll" ref={scrollRef}>
           <div
             className="video-timeline-inner"
-            style={fitToWidth ? { width: "100%" } : { width: totalWidth }}
+            style={fitToWidth ? { width: "100%", minWidth: totalWidth } : { width: totalWidth }}
           >
             <div
               className="video-timeline-ruler"
@@ -574,7 +638,9 @@ export function VideoTimelineEditor({
                 onMouseDown={seekFromTrackClick}
               >
                 {clips.map((clip) => {
-                  const left = clip.startMs * pxPerMs;
+                  const displayStartMs =
+                    overlayDisplayTimes.get(clip.suggestionId) ?? clip.startMs;
+                  const left = displayStartMs * pxPerMs;
                   const width = Math.max(clip.durationMs * pxPerMs, 22);
                   const isSelected = selectionMatches(selected, {
                     kind: "overlay",
@@ -590,7 +656,7 @@ export function VideoTimelineEditor({
                       key={clip.suggestionId}
                       className={`timeline-clip ${isSelected ? "selected" : ""}`}
                       style={{ left, width }}
-                      title={`${clip.title} - ${formatTimeMs(clip.startMs)}`}
+                      title={`${clip.title} - ${formatTimeMs(displayStartMs)}`}
                       onMouseDown={(e) => {
                         e.stopPropagation();
                         onSelect(target);
@@ -599,7 +665,7 @@ export function VideoTimelineEditor({
                           target,
                           startX: e.clientX,
                           startY: e.clientY,
-                          origStartMs: clip.startMs,
+                          origStartMs: displayStartMs,
                         });
                       }}
                     >
@@ -613,7 +679,7 @@ export function VideoTimelineEditor({
                             target,
                             startX: e.clientX,
                             startY: e.clientY,
-                            origStartMs: clip.startMs,
+                            origStartMs: displayStartMs,
                             origDurationMs: clip.durationMs,
                           });
                         }}
@@ -637,7 +703,7 @@ export function VideoTimelineEditor({
                             target,
                             startX: e.clientX,
                             startY: e.clientY,
-                            origStartMs: clip.startMs,
+                            origStartMs: displayStartMs,
                             origDurationMs: clip.durationMs,
                           });
                         }}
@@ -658,9 +724,18 @@ export function VideoTimelineEditor({
                 style={{ width: timelineWidth }}
                 onMouseDown={seekFromTrackClick}
               >
-                <div className="timeline-base-video-clip" style={{ width: timelineWidth }}>
-                  <span>{baseVideoLabel}</span>
-                </div>
+                {baseVideoSegments.map((segment) => (
+                  <div
+                    key={segment.key}
+                    className="timeline-base-video-clip"
+                    style={{
+                      left: segment.finalStartMs * pxPerMs,
+                      width: Math.max((segment.finalEndMs - segment.finalStartMs) * pxPerMs, 22),
+                    }}
+                  >
+                    <span>{baseVideoLabel}</span>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -679,12 +754,23 @@ export function VideoTimelineEditor({
                     ? displayPeaks.map((peak, i) => (
                         <span
                           key={i}
-                          style={{ height: 5 + Math.max(0.02, peak) * 35 }}
+                          style={{
+                            height: 5 + Math.max(0.02, peak) * 35,
+                            width: Math.max(1, timelineWidth / displayPeaks.length - 1),
+                          }}
                         />
                       ))
-                    : Array.from({ length: 96 }).map((_, i) => (
-                        <span key={i} style={{ height: fallbackAudioBarHeight(i) }} />
-                      ))}
+                    : Array.from({ length: Math.max(96, Math.round(timelineWidth / 4)) }).map(
+                        (_, i) => (
+                          <span
+                            key={i}
+                            style={{
+                              height: fallbackAudioBarHeight(i),
+                              width: Math.max(1, timelineWidth / 96 - 1),
+                            }}
+                          />
+                        ),
+                      )}
                 </div>
               </div>
             </div>

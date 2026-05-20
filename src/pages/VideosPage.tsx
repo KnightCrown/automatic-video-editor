@@ -327,6 +327,9 @@ export function VideosPage() {
               rootPath={project.rootPath}
               clips={clips}
               videoClips={videoClips}
+              contentStartMs={timeline?.contentStartMs}
+              contentEndMs={timeline?.contentEndMs}
+              enablePreviewKeyboard={!editingVideo}
               exports={exports}
               ffmpegOk={ffmpegOk}
               playingExportId={playingExportId}
@@ -346,6 +349,8 @@ export function VideosPage() {
           rootPath={project.rootPath}
           initialClips={clips}
           initialVideoClips={videoClips}
+          contentStartMs={timeline?.contentStartMs}
+          contentEndMs={timeline?.contentEndMs}
           audioWaveform={audioWaveforms[editingVideo.id] ?? null}
           onSave={async ({ clips: nextClips, videoClips: nextVideoClips }) => {
             const nextTimeline: FinalVideoTimeline = {
@@ -462,6 +467,9 @@ function EpisodeVideosPanel({
   rootPath,
   clips,
   videoClips,
+  contentStartMs,
+  contentEndMs,
+  enablePreviewKeyboard = true,
   exports,
   ffmpegOk,
   playingExportId,
@@ -475,6 +483,9 @@ function EpisodeVideosPanel({
   rootPath: string;
   clips: VideoOverlayClip[];
   videoClips: TimelineVideoClip[];
+  contentStartMs?: number;
+  contentEndMs?: number;
+  enablePreviewKeyboard?: boolean;
   exports: FinalVideoExport[];
   ffmpegOk: boolean | null;
   playingExportId: string | null;
@@ -590,6 +601,10 @@ function EpisodeVideosPanel({
             videoPath={video.path}
             rootPath={rootPath}
             clips={clips}
+            videoClips={videoClips}
+            contentStartMs={contentStartMs}
+            contentEndMs={contentEndMs}
+            enableKeyboardShortcuts={enablePreviewKeyboard}
           />
 
           {exporting && exportSession.progress ? (

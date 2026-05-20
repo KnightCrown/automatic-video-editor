@@ -10,13 +10,20 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { getOverlayImageDisplayUrl } from "../../services/pipelineService";
-import type { VideoOverlayClip } from "../../types/pipeline";
+import type { TimelineVideoClip, VideoOverlayClip } from "../../types/pipeline";
 import { VideoSeekWithMarkers } from "./VideoSeekWithMarkers";
 import {
   formatTimeMs,
   getActiveClips,
   layoutStyle,
 } from "../../utils/overlayClips";
+import {
+  buildTimelineInsertPlan,
+  clipInsertAtMs,
+  effectiveClipDurationMs,
+  isInsertClip,
+  sourceToFinalMs,
+} from "../../utils/timelineInserts";
 import {
   clampOverlayEditorRect,
   editorRectToLayout,
@@ -34,12 +41,16 @@ type Props = {
   videoPath: string;
   rootPath: string;
   clips: VideoOverlayClip[];
+  videoClips?: TimelineVideoClip[];
+  contentStartMs?: number;
+  contentEndMs?: number;
   className?: string;
   large?: boolean;
   onTimeUpdate?: (ms: number) => void;
   onDurationChange?: (durationMs: number) => void;
   showSeekMarkers?: boolean;
   hideControls?: boolean;
+  enableKeyboardShortcuts?: boolean;
   interactiveOverlays?: boolean;
   selectedClipId?: string | null;
   onSelectClip?: (clipId: string) => void;
@@ -48,18 +59,41 @@ type Props = {
 
 type OverlayDragMode = "move" | "resize";
 
+type PreviewSegment = {
+  key: string;
+  src: string;
+  finalStartMs: number;
+  finalEndMs: number;
+  mediaStartMs: number;
+};
+
+function isAbsolutePath(path: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/") || path.startsWith("\\\\");
+}
+
+function resolveTimelineVideoSrc(rootPath: string, relativePath: string): string {
+  if (isAbsolutePath(relativePath)) return convertFileSrc(relativePath);
+  const root = rootPath.replace(/[\\/]+$/, "");
+  const rel = relativePath.replace(/\//g, "\\").replace(/^[\\/]+/, "");
+  return convertFileSrc(`${root}\\${rel}`);
+}
+
 export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
   function VideoPreviewWithOverlays(
     {
       videoPath,
       rootPath,
       clips,
+      videoClips = [],
+      contentStartMs,
+      contentEndMs,
       className = "",
       large = false,
       onTimeUpdate,
       onDurationChange,
       showSeekMarkers = true,
       hideControls = false,
+      enableKeyboardShortcuts = true,
       interactiveOverlays = false,
       selectedClipId = null,
       onSelectClip,
@@ -69,11 +103,26 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
   ) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
+    const baseSrc = useMemo(() => convertFileSrc(videoPath), [videoPath]);
     const [playing, setPlaying] = useState(false);
     const [currentMs, setCurrentMs] = useState(0);
     const [durationMs, setDurationMs] = useState(0);
+    const [sourceDurationMs, setSourceDurationMs] = useState(0);
+    const [mediaSrc, setMediaSrc] = useState(baseSrc);
     const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+    const videoClipUrls = useMemo(
+      () =>
+        Object.fromEntries(
+          videoClips.map((clip) => [
+            clip.id,
+            resolveTimelineVideoSrc(rootPath, clip.sourceRelativePath),
+          ]),
+        ),
+      [rootPath, videoClips],
+    );
     const rafRef = useRef<number | null>(null);
+    const activeSegmentRef = useRef<PreviewSegment | null>(null);
+    const pendingSeekRef = useRef<{ ms: number; play: boolean } | null>(null);
     const overlayDragRef = useRef<{
       clipId: string;
       mode: OverlayDragMode;
@@ -82,15 +131,143 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
       startRect: OverlayEditorRect;
     } | null>(null);
 
+    useEffect(() => {
+      setMediaSrc(baseSrc);
+      setCurrentMs(0);
+      setSourceDurationMs(0);
+      activeSegmentRef.current = null;
+      pendingSeekRef.current = null;
+    }, [baseSrc]);
+
+    const contentWindow = useMemo(() => {
+      const start = contentStartMs ?? 0;
+      const end = Math.max(start + 1, contentEndMs ?? sourceDurationMs);
+      return { start, end };
+    }, [contentEndMs, contentStartMs, sourceDurationMs]);
+
+    const insertClips = useMemo(
+      () =>
+        videoClips
+          .filter(isInsertClip)
+          .map((clip) => ({
+            clip,
+            insertAtMs: clipInsertAtMs(clip, contentWindow.start, contentWindow.end),
+            durationMs: effectiveClipDurationMs(clip),
+          }))
+          .sort((a, b) => {
+            return a.insertAtMs - b.insertAtMs || a.clip.trackIndex - b.clip.trackIndex;
+          }),
+      [contentWindow.end, contentWindow.start, videoClips],
+    );
+
+    const previewSegments = useMemo<PreviewSegment[]>(() => {
+      const segments: PreviewSegment[] = [];
+      let cursor = contentWindow.start;
+      let finalCursor = 0;
+
+      for (const insert of insertClips) {
+        if (insert.insertAtMs > cursor) {
+          const duration = insert.insertAtMs - cursor;
+          segments.push({
+            key: `base-${cursor}`,
+            src: baseSrc,
+            finalStartMs: finalCursor,
+            finalEndMs: finalCursor + duration,
+            mediaStartMs: cursor,
+          });
+          finalCursor += duration;
+          cursor = insert.insertAtMs;
+        }
+        const src = videoClipUrls[insert.clip.id];
+        if (src) {
+          segments.push({
+            key: insert.clip.id,
+            src,
+            finalStartMs: finalCursor,
+            finalEndMs: finalCursor + insert.durationMs,
+            mediaStartMs: insert.clip.trimStartMs ?? 0,
+          });
+          finalCursor += insert.durationMs;
+        }
+      }
+
+      if (contentWindow.end > cursor) {
+        const duration = contentWindow.end - cursor;
+        segments.push({
+          key: `base-${cursor}`,
+          src: baseSrc,
+          finalStartMs: finalCursor,
+          finalEndMs: finalCursor + duration,
+          mediaStartMs: cursor,
+        });
+      }
+
+      if (segments.length === 0) {
+        segments.push({
+          key: "base",
+          src: baseSrc,
+          finalStartMs: 0,
+          finalEndMs: sourceDurationMs || 1,
+          mediaStartMs: 0,
+        });
+      }
+      return segments;
+    }, [baseSrc, contentWindow.end, contentWindow.start, insertClips, sourceDurationMs, videoClipUrls]);
+
+    const previewDurationMs = useMemo(
+      () => previewSegments[previewSegments.length - 1]?.finalEndMs ?? sourceDurationMs,
+      [previewSegments, sourceDurationMs],
+    );
+
+    useEffect(() => {
+      if (previewDurationMs > 0) {
+        setDurationMs(previewDurationMs);
+        onDurationChange?.(previewDurationMs);
+      }
+    }, [onDurationChange, previewDurationMs]);
+
+    const segmentForFinalMs = useCallback(
+      (ms: number) =>
+        previewSegments.find((segment) => ms >= segment.finalStartMs && ms < segment.finalEndMs) ??
+        previewSegments[previewSegments.length - 1],
+      [previewSegments],
+    );
+
+    const applyPreviewTime = useCallback(
+      (ms: number, play = false) => {
+        const v = videoRef.current;
+        const clamped = Math.max(0, Math.min(previewDurationMs || 0, ms));
+        const segment = segmentForFinalMs(clamped);
+        if (!v || !segment) {
+          setCurrentMs(clamped);
+          onTimeUpdate?.(clamped);
+          return;
+        }
+        const mediaMs = segment.mediaStartMs + (clamped - segment.finalStartMs);
+        activeSegmentRef.current = segment;
+        if (mediaSrc !== segment.src) {
+          pendingSeekRef.current = { ms: mediaMs, play };
+          setMediaSrc(segment.src);
+        } else {
+          v.currentTime = mediaMs / 1000;
+          if (play) void v.play();
+        }
+        setCurrentMs(clamped);
+        onTimeUpdate?.(clamped);
+      },
+      [mediaSrc, onTimeUpdate, previewDurationMs, segmentForFinalMs],
+    );
+
+    useEffect(() => {
+      activeSegmentRef.current = segmentForFinalMs(currentMs);
+    }, [currentMs, segmentForFinalMs]);
+
     useImperativeHandle(ref, () => ({
       seekToMs(ms: number) {
-        const v = videoRef.current;
-        if (!v) return;
-        v.currentTime = ms / 1000;
-        setCurrentMs(ms);
+        applyPreviewTime(ms);
       },
       getCurrentTimeMs() {
-        return (videoRef.current?.currentTime ?? 0) * 1000;
+        return currentMs;
       },
       getVideoElement() {
         return videoRef.current;
@@ -115,9 +292,36 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
       };
     }, [clips, rootPath]);
 
+    const insertOffsets = useMemo(() => {
+      const end = Math.max(contentWindow.start + 1, contentWindow.end);
+      return buildTimelineInsertPlan(videoClips, contentWindow.start, end).insertOffsets;
+    }, [contentWindow.end, contentWindow.start, videoClips]);
+
+    const displayClips = useMemo(
+      () =>
+        clips.map((clip) => ({
+          ...clip,
+          startMs: sourceToFinalMs(clip.startMs, contentWindow.start, insertOffsets),
+        })),
+      [clips, contentWindow.start, insertOffsets],
+    );
+
     const activeClips = useMemo(
-      () => getActiveClips(clips, currentMs),
-      [clips, currentMs],
+      () => getActiveClips(displayClips, currentMs),
+      [displayClips, currentMs],
+    );
+
+    const activeOverlayVideoClips = useMemo(
+      () =>
+        videoClips
+          .filter((clip) => !isInsertClip(clip))
+          .map((clip) => ({
+            clip,
+            finalStartMs: sourceToFinalMs(clip.startMs, contentWindow.start, insertOffsets),
+            durationMs: effectiveClipDurationMs(clip),
+          }))
+          .filter(({ finalStartMs, durationMs }) => currentMs >= finalStartMs && currentMs < finalStartMs + durationMs),
+      [contentWindow.start, currentMs, insertOffsets, videoClips],
     );
 
     const pointerPercent = useCallback((clientX: number, clientY: number) => {
@@ -186,13 +390,25 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
     const tick = useCallback(() => {
       const v = videoRef.current;
       if (!v) return;
-      const ms = v.currentTime * 1000;
-      setCurrentMs(ms);
-      onTimeUpdate?.(ms);
+      if (pendingSeekRef.current) {
+        if (playing) rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const segment = activeSegmentRef.current ?? segmentForFinalMs(currentMs);
+      if (!segment) return;
+      const mediaMs = v.currentTime * 1000;
+      const ms = segment.finalStartMs + (mediaMs - segment.mediaStartMs);
+      if (ms >= segment.finalEndMs - 30 && segment.finalEndMs < previewDurationMs - 1) {
+        applyPreviewTime(segment.finalEndMs + 1, true);
+        return;
+      }
+      const clamped = Math.max(0, Math.min(previewDurationMs, ms));
+      setCurrentMs(clamped);
+      onTimeUpdate?.(clamped);
       if (!v.paused) {
         rafRef.current = requestAnimationFrame(tick);
       }
-    }, [onTimeUpdate]);
+    }, [applyPreviewTime, currentMs, onTimeUpdate, playing, previewDurationMs, segmentForFinalMs]);
 
     useEffect(() => {
       if (playing) {
@@ -209,34 +425,30 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
       const v = videoRef.current;
       if (!v) return;
       if (v.paused) {
-        void v.play();
+        applyPreviewTime(currentMs, true);
         setPlaying(true);
       } else {
         v.pause();
         setPlaying(false);
       }
-    }, []);
+    }, [applyPreviewTime, currentMs]);
 
     useEffect(() => {
+      if (!enableKeyboardShortcuts) return;
       const onKey = (e: KeyboardEvent) => {
-        if (e.code === "Space" && e.target === document.body) {
-          e.preventDefault();
-          togglePlay();
-        }
+        if (e.code !== "Space" || e.target !== document.body) return;
+        e.preventDefault();
+        togglePlay();
       };
       window.addEventListener("keydown", onKey);
       return () => window.removeEventListener("keydown", onKey);
-    }, [togglePlay]);
+    }, [enableKeyboardShortcuts, togglePlay]);
 
     const seekToMs = useCallback(
       (ms: number) => {
-        const v = videoRef.current;
-        if (!v) return;
-        v.currentTime = ms / 1000;
-        setCurrentMs(ms);
-        onTimeUpdate?.(ms);
+        applyPreviewTime(ms);
       },
-      [onTimeUpdate],
+      [applyPreviewTime],
     );
 
     const startOverlayDrag = useCallback(
@@ -267,29 +479,87 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
           <video
             ref={videoRef}
             className="video-preview-video"
-            src={convertFileSrc(videoPath)}
+            src={mediaSrc}
             preload="metadata"
             onLoadedMetadata={() => {
               const v = videoRef.current;
-              if (v && v.duration > 0) {
-                const d = v.duration * 1000;
-                setDurationMs(d);
-                onDurationChange?.(d);
+              if (!v) return;
+              if (mediaSrc === baseSrc && v.duration > 0) {
+                setSourceDurationMs(v.duration * 1000);
+              }
+              const pending = pendingSeekRef.current;
+              if (pending) {
+                v.currentTime = pending.ms / 1000;
+                if (pending.play) void v.play();
+                pendingSeekRef.current = null;
               }
             }}
             onTimeUpdate={() => {
               const v = videoRef.current;
+              if (pendingSeekRef.current) return;
               if (v && v.paused) {
-                const ms = v.currentTime * 1000;
+                const segment = activeSegmentRef.current ?? segmentForFinalMs(currentMs);
+                if (!segment) return;
+                const ms = Math.max(
+                  0,
+                  Math.min(
+                    previewDurationMs,
+                    segment.finalStartMs + (v.currentTime * 1000 - segment.mediaStartMs),
+                  ),
+                );
                 setCurrentMs(ms);
                 onTimeUpdate?.(ms);
               }
             }}
             onPlay={() => setPlaying(true)}
-            onPause={() => setPlaying(false)}
-            onEnded={() => setPlaying(false)}
+            onPause={() => {
+              if (pendingSeekRef.current) return;
+              setPlaying(false);
+            }}
+            onEnded={() => {
+              const segment = activeSegmentRef.current;
+              if (segment && segment.finalEndMs < previewDurationMs - 1) {
+                applyPreviewTime(segment.finalEndMs + 1, true);
+              } else {
+                setPlaying(false);
+              }
+            }}
           />
           <div className="video-preview-overlays">
+            {activeOverlayVideoClips.map(({ clip, finalStartMs }) => {
+              const src = videoClipUrls[clip.id];
+              if (!src) return null;
+              const scale = Math.max(12, Math.min(100, clip.scalePct ?? 100));
+              const opacity = Math.max(0, Math.min(1, (clip.opacityPct ?? 100) / 100));
+              const full = scale >= 99.5;
+              return (
+                <video
+                  key={clip.id}
+                  className="video-preview-overlay-img"
+                  src={src}
+                  muted
+                  autoPlay
+                  playsInline
+                  style={
+                    full
+                      ? { inset: 0, width: "100%", height: "100%", objectFit: "contain", opacity }
+                      : {
+                          left: "50%",
+                          top: "50%",
+                          width: `${scale}%`,
+                          transform: "translate(-50%, -50%)",
+                          opacity,
+                        }
+                  }
+                  onLoadedMetadata={(e) => {
+                    const media = e.currentTarget;
+                    media.currentTime =
+                      ((clip.trimStartMs ?? 0) + (currentMs - finalStartMs)) / 1000;
+                    void media.play();
+                  }}
+                />
+              );
+            })}
             {activeClips.map((clip) => {
               const url = imageUrls[clip.suggestionId];
               if (!url) return null;
@@ -354,11 +624,11 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
           <button type="button" className="btn small" onClick={togglePlay}>
             {playing ? "Pause" : "Play"}
           </button>
-          {showSeekMarkers && clips.length > 0 ? (
+          {showSeekMarkers && displayClips.length > 0 ? (
             <VideoSeekWithMarkers
               durationMs={durationMs}
               currentMs={currentMs}
-              clips={clips}
+              clips={displayClips}
               onSeek={seekToMs}
             />
           ) : (
