@@ -14,7 +14,7 @@ import {
   exportFinalVideo,
   recordFinalVideoExport,
 } from "../services/pipelineService";
-import type { VideoExportProgress, VideoOverlayClip } from "../types/pipeline";
+import type { VideoExportProgress, TimelineVideoClip, VideoOverlayClip } from "../types/pipeline";
 import { pickVideoSavePath, sanitizeDownloadFilename } from "../utils/download";
 
 export type VideoExportStatus = "idle" | "exporting" | "success" | "error" | "cancelled";
@@ -38,6 +38,7 @@ type VideoExportContextValue = {
     fileName: string;
     rootPath: string;
     clips: VideoOverlayClip[];
+    videoClips?: TimelineVideoClip[];
   }) => Promise<boolean>;
   cancelExport: (videoId: string) => Promise<void>;
   clearSession: (videoId: string) => void;
@@ -156,11 +157,13 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
       fileName,
       rootPath,
       clips,
+      videoClips = [],
     }: {
       videoId: string;
       fileName: string;
       rootPath: string;
       clips: VideoOverlayClip[];
+      videoClips?: TimelineVideoClip[];
     }) => {
       const cur = sessionsRef.current[videoId];
       if (cur?.status === "exporting") return false;
@@ -189,7 +192,7 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
       });
 
       try {
-        const path = await exportFinalVideo(rootPath, videoId, outPath, clips);
+        const path = await exportFinalVideo(rootPath, videoId, outPath, clips, videoClips);
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         try {
           await recordFinalVideoExport(

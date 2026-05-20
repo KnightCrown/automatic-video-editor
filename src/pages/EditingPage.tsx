@@ -18,6 +18,7 @@ import {
   getOverlayImagesManifest,
   getTranscript,
   getTranscriptAnalysis,
+  ensureAudioWaveform,
   getFinalVideoTimeline,
   isApiKeySet,
   isXaiApiKeySet,
@@ -77,6 +78,7 @@ export function EditingPage() {
   const [approvedSuggestionIds, setApprovedSuggestionIds] = useState<Set<string>>(new Set());
   const [displayUrls, setDisplayUrls] = useState<Record<string, string>>({});
   const [creatingVideo, setCreatingVideo] = useState(false);
+  const [createVideoStatus, setCreateVideoStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [apiKeySet, setApiKeySet] = useState<boolean | null>(null);
   const [xaiKeySet, setXaiKeySet] = useState<boolean | null>(null);
@@ -419,14 +421,22 @@ export function EditingPage() {
     );
     if (!project || !activeVideo || clipIds.length === 0) return;
     setCreatingVideo(true);
+    setCreateVideoStatus("Preparing final video timeline...");
     setError(null);
     try {
       await prepareFinalVideoTimelineWithSelection(project.rootPath, activeVideo.id, clipIds);
+      setCreateVideoStatus("Generating audio peak waveform...");
+      try {
+        await ensureAudioWaveform(project.rootPath, activeVideo.id);
+      } catch (waveformErr) {
+        console.warn("Could not pre-generate audio waveform", waveformErr);
+      }
       navigate("/videos", { state: { videoId: activeVideo.id } });
     } catch (err) {
       setError(String(err));
     } finally {
       setCreatingVideo(false);
+      setCreateVideoStatus(null);
     }
   }
 
@@ -559,6 +569,12 @@ export function EditingPage() {
       {error && (
         <div className="mb-4 p-3 rounded-lg bg-danger bg-opacity-20 text-danger text-sm border border-danger border-opacity-30">
           {error}
+        </div>
+      )}
+
+      {createVideoStatus && (
+        <div className="mb-4 p-3 rounded-lg bg-primary bg-opacity-15 text-white text-sm border border-primary border-opacity-30">
+          {createVideoStatus}
         </div>
       )}
 

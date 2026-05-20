@@ -8,25 +8,31 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { Eye, Film, Music2, Plus, Scissors, Trash2, ZoomIn, ZoomOut } from "lucide-react";
-import type { VideoOverlayClip } from "../../types/pipeline";
+import type { AudioWaveform, TimelineVideoClip, VideoOverlayClip } from "../../types/pipeline";
 import { formatTimeMs } from "../../utils/overlayClips";
+import { videoClipEndMs } from "../../utils/timelineVideoClips";
 
 const MIN_DURATION_MS = 500;
 const SNAP_THRESHOLD_MS = 100;
 const LABEL_WIDTH_PX = 148;
 
+export type TimelineEditorSelection =
+  | { kind: "overlay"; id: string }
+  | { kind: "video"; id: string };
+
 type DragMode =
-  | { kind: "move"; clipId: string; startX: number; origStartMs: number }
+  | { kind: "move"; target: TimelineEditorSelection; startX: number; origStartMs: number }
   | {
       kind: "resize-left";
-      clipId: string;
+      target: TimelineEditorSelection;
       startX: number;
       origStartMs: number;
       origDurationMs: number;
+      origTrimStartMs?: number;
     }
   | {
       kind: "resize-right";
-      clipId: string;
+      target: TimelineEditorSelection;
       startX: number;
       origStartMs: number;
       origDurationMs: number;
@@ -35,16 +41,22 @@ type DragMode =
 
 type Props = {
   clips: VideoOverlayClip[];
+  videoClips: TimelineVideoClip[];
+  emptyTrackIndices: number[];
   durationMs: number;
   currentMs: number;
-  selectedId: string | null;
+  selected: TimelineEditorSelection | null;
   pxPerMs: number;
+  baseVideoLabel: string;
   imageUrls?: Record<string, string>;
+  audioWaveform?: AudioWaveform | null;
   onClipsChange: (clips: VideoOverlayClip[]) => void;
-  onSelect: (id: string | null) => void;
+  onVideoClipsChange: (clips: TimelineVideoClip[]) => void;
+  onSelect: (selection: TimelineEditorSelection | null) => void;
   onSeek: (ms: number) => void;
   onPxPerMsChange: (px: number) => void;
-  /** Scale timeline so full duration fits the visible track width. */
+  onAddTrack: () => void;
+  onAddMedia: () => void;
   fitToWidth?: boolean;
 };
 
@@ -55,51 +67,89 @@ function tickIntervalMs(durationMs: number): number {
   return 300_000;
 }
 
-function audioBarHeight(index: number): number {
+function fallbackAudioBarHeight(index: number): number {
   return 18 + ((index * 37) % 42);
+}
+
+function waveformBarCount(timelineWidth: number): number {
+  return Math.max(80, Math.min(1800, Math.round(timelineWidth / 3)));
+}
+
+function buildDisplayPeaks(
+  waveform: AudioWaveform | null | undefined,
+  barCount: number,
+): number[] {
+  const source = waveform?.peaks ?? [];
+  if (source.length === 0) return [];
+  if (source.length <= barCount) return source;
+
+  return Array.from({ length: barCount }, (_, i) => {
+    const start = Math.floor((i * source.length) / barCount);
+    const end = Math.max(start + 1, Math.floor(((i + 1) * source.length) / barCount));
+    let peak = 0;
+    for (let j = start; j < end; j++) {
+      peak = Math.max(peak, source[j] ?? 0);
+    }
+    return peak;
+  });
+}
+
+function selectionMatches(a: TimelineEditorSelection | null, b: TimelineEditorSelection): boolean {
+  return a?.kind === b.kind && a.id === b.id;
 }
 
 export function VideoTimelineEditor({
   clips,
+  videoClips,
+  emptyTrackIndices,
   durationMs,
   currentMs,
-  selectedId,
+  selected,
   pxPerMs,
+  baseVideoLabel,
   imageUrls = {},
+  audioWaveform = null,
   onClipsChange,
+  onVideoClipsChange,
   onSelect,
   onSeek,
   onPxPerMsChange,
+  onAddTrack,
+  onAddMedia,
   fitToWidth = false,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+  const [trackAreaWidth, setTrackAreaWidth] = useState(640);
   const [drag, setDrag] = useState<DragMode | null>(null);
 
   useLayoutEffect(() => {
-    if (!fitToWidth || durationMs <= 0) return;
     const el = trackAreaRef.current;
     if (!el) return;
-
-    const applyFit = () => {
-      const w = el.clientWidth;
-      if (w <= 0) return;
-      const fit = Math.max(0.002, Math.min(0.25, (w - 16) / durationMs));
-      onPxPerMsChange(fit);
-    };
-
-    applyFit();
-    const ro = new ResizeObserver(applyFit);
+    const apply = () => setTrackAreaWidth(Math.max(1, el.clientWidth));
+    apply();
+    const ro = new ResizeObserver(apply);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [durationMs, fitToWidth, onPxPerMsChange]);
+  }, []);
 
-  const timelineWidth = Math.max(
-    durationMs * pxPerMs,
-    trackAreaRef.current?.clientWidth ?? 640,
-  );
+  useLayoutEffect(() => {
+    if (!fitToWidth || durationMs <= 0) return;
+    const w = trackAreaWidth;
+    if (w <= 0) return;
+    const fit = Math.max(0.0003, Math.min(0.25, w / durationMs));
+    onPxPerMsChange(fit);
+  }, [durationMs, fitToWidth, onPxPerMsChange, trackAreaWidth]);
+
+  const timelineWidth = fitToWidth
+    ? trackAreaWidth
+    : Math.max(durationMs * pxPerMs, trackAreaWidth);
   const totalWidth = timelineWidth + LABEL_WIDTH_PX;
   const tickStep = tickIntervalMs(durationMs);
+  const displayPeaks = useMemo(
+    () => buildDisplayPeaks(audioWaveform, waveformBarCount(timelineWidth)),
+    [audioWaveform, timelineWidth],
+  );
   const ticks = useMemo(
     () =>
       Array.from({ length: Math.ceil(durationMs / tickStep) + 1 }, (_, i) =>
@@ -108,12 +158,20 @@ export function VideoTimelineEditor({
     [durationMs, tickStep],
   );
 
+  const extraTrackIndices = useMemo(() => {
+    const fromClips = videoClips.map((clip) => clip.trackIndex);
+    const merged = new Set([...fromClips, ...emptyTrackIndices]);
+    return Array.from(merged).sort((a, b) => b - a);
+  }, [emptyTrackIndices, videoClips]);
+
   const snapMs = useCallback((ms: number, playheadMs: number): number => {
     if (Math.abs(ms - playheadMs) <= SNAP_THRESHOLD_MS) return playheadMs;
     return ms;
   }, []);
 
-  const updateClip = useCallback(
+  const pxToMs = useCallback((dx: number) => Math.round(dx / pxPerMs), [pxPerMs]);
+
+  const updateOverlayClip = useCallback(
     (clipId: string, patch: Partial<VideoOverlayClip>) => {
       onClipsChange(
         clips.map((c) => (c.suggestionId === clipId ? { ...c, ...patch } : c)),
@@ -122,7 +180,14 @@ export function VideoTimelineEditor({
     [clips, onClipsChange],
   );
 
-  const pxToMs = useCallback((dx: number) => Math.round(dx / pxPerMs), [pxPerMs]);
+  const updateVideoClip = useCallback(
+    (clipId: string, patch: Partial<TimelineVideoClip>) => {
+      onVideoClipsChange(
+        videoClips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)),
+      );
+    },
+    [onVideoClipsChange, videoClips],
+  );
 
   useEffect(() => {
     if (!drag) return;
@@ -136,31 +201,74 @@ export function VideoTimelineEditor({
         return;
       }
 
-      const clip = clips.find((c) => c.suggestionId === drag.clipId);
+      if (drag.target.kind === "overlay") {
+        const clip = clips.find((c) => c.suggestionId === drag.target.id);
+        if (!clip) return;
+
+        if (drag.kind === "move") {
+          let start = Math.max(
+            0,
+            Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)),
+          );
+          start = snapMs(start, currentMs);
+          updateOverlayClip(drag.target.id, { startMs: start });
+        } else if (drag.kind === "resize-left") {
+          const delta = pxToMs(dx);
+          let start = Math.max(0, drag.origStartMs + delta);
+          let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs - delta);
+          if (start + duration > durationMs) duration = durationMs - start;
+          start = snapMs(start, currentMs);
+          updateOverlayClip(drag.target.id, { startMs: start, durationMs: duration });
+        } else if (drag.kind === "resize-right") {
+          let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs + pxToMs(dx));
+          let end = drag.origStartMs + duration;
+          end = snapMs(end, currentMs);
+          duration = Math.max(MIN_DURATION_MS, end - drag.origStartMs);
+          if (drag.origStartMs + duration > durationMs) {
+            duration = durationMs - drag.origStartMs;
+          }
+          updateOverlayClip(drag.target.id, { durationMs: duration });
+        }
+        return;
+      }
+
+      const clip = videoClips.find((c) => c.id === drag.target.id);
       if (!clip) return;
+      const trimStart = clip.trimStartMs ?? 0;
+      const maxDuration = clip.sourceDurationMs - trimStart;
 
       if (drag.kind === "move") {
-        let start = Math.max(0, Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)));
+        let start = Math.max(
+          0,
+          Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)),
+        );
         start = snapMs(start, currentMs);
-        updateClip(drag.clipId, { startMs: start });
+        updateVideoClip(drag.target.id, { startMs: start });
       } else if (drag.kind === "resize-left") {
         const delta = pxToMs(dx);
         let start = Math.max(0, drag.origStartMs + delta);
         let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs - delta);
-        if (start + duration > durationMs) {
-          duration = durationMs - start;
+        let nextTrim = Math.max(0, (drag.origTrimStartMs ?? trimStart) + delta);
+        if (nextTrim + duration > clip.sourceDurationMs) {
+          duration = clip.sourceDurationMs - nextTrim;
         }
+        if (start + duration > durationMs) duration = durationMs - start;
         start = snapMs(start, currentMs);
-        updateClip(drag.clipId, { startMs: start, durationMs: duration });
+        updateVideoClip(drag.target.id, {
+          startMs: start,
+          durationMs: duration,
+          trimStartMs: nextTrim,
+        });
       } else if (drag.kind === "resize-right") {
         let duration = Math.max(MIN_DURATION_MS, drag.origDurationMs + pxToMs(dx));
+        duration = Math.min(duration, maxDuration);
         let end = drag.origStartMs + duration;
         end = snapMs(end, currentMs);
         duration = Math.max(MIN_DURATION_MS, end - drag.origStartMs);
         if (drag.origStartMs + duration > durationMs) {
           duration = durationMs - drag.origStartMs;
         }
-        updateClip(drag.clipId, { durationMs: duration });
+        updateVideoClip(drag.target.id, { durationMs: duration });
       }
     };
 
@@ -172,19 +280,34 @@ export function VideoTimelineEditor({
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [clips, currentMs, drag, durationMs, onSeek, pxToMs, snapMs, updateClip]);
+  }, [
+    clips,
+    currentMs,
+    drag,
+    durationMs,
+    onSeek,
+    pxToMs,
+    snapMs,
+    updateOverlayClip,
+    updateVideoClip,
+    videoClips,
+  ]);
 
   const deleteSelected = useCallback(() => {
-    if (!selectedId) return;
-    onClipsChange(clips.filter((c) => c.suggestionId !== selectedId));
+    if (!selected) return;
+    if (selected.kind === "overlay") {
+      onClipsChange(clips.filter((c) => c.suggestionId !== selected.id));
+    } else {
+      onVideoClipsChange(videoClips.filter((c) => c.id !== selected.id));
+    }
     onSelect(null);
-  }, [clips, onClipsChange, onSelect, selectedId]);
+  }, [clips, onClipsChange, onSelect, onVideoClipsChange, selected, videoClips]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Delete" || e.key === "Backspace") {
         if (
-          selectedId &&
+          selected &&
           (e.target === document.body ||
             (e.target as HTMLElement).closest(".video-timeline-editor"))
         ) {
@@ -195,7 +318,7 @@ export function VideoTimelineEditor({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, selectedId]);
+  }, [deleteSelected, selected]);
 
   const seekFromTrackClick = useCallback(
     (e: ReactMouseEvent<HTMLElement>) => {
@@ -221,6 +344,63 @@ export function VideoTimelineEditor({
     [currentMs],
   );
 
+  const renderVideoClip = (clip: TimelineVideoClip) => {
+    const left = clip.startMs * pxPerMs;
+    const width = Math.max(clip.durationMs * pxPerMs, 22);
+    const isSelected = selectionMatches(selected, { kind: "video", id: clip.id });
+    const target: TimelineEditorSelection = { kind: "video", id: clip.id };
+
+    return (
+      <div
+        key={clip.id}
+        className={`timeline-clip video-clip ${isSelected ? "selected" : ""}`}
+        style={{ left, width }}
+        title={`${clip.fileName} - ${formatTimeMs(clip.startMs)}`}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          onSelect(target);
+          setDrag({
+            kind: "move",
+            target,
+            startX: e.clientX,
+            origStartMs: clip.startMs,
+          });
+        }}
+      >
+        <div
+          className="timeline-clip-handle left"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            onSelect(target);
+            setDrag({
+              kind: "resize-left",
+              target,
+              startX: e.clientX,
+              origStartMs: clip.startMs,
+              origDurationMs: clip.durationMs,
+              origTrimStartMs: clip.trimStartMs ?? 0,
+            });
+          }}
+        />
+        <span className="timeline-clip-label">{clip.fileName}</span>
+        <div
+          className="timeline-clip-handle right"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            onSelect(target);
+            setDrag({
+              kind: "resize-right",
+              target,
+              startX: e.clientX,
+              origStartMs: clip.startMs,
+              origDurationMs: clip.durationMs,
+            });
+          }}
+        />
+      </div>
+    );
+  };
+
   return (
     <div className={`video-timeline-editor${fitToWidth ? " fit-width" : ""}`}>
       <div className="video-timeline-toolbar">
@@ -237,7 +417,7 @@ export function VideoTimelineEditor({
           <button
             type="button"
             className="video-editor-icon-button"
-            onClick={() => onPxPerMsChange(Math.max(0.002, pxPerMs / 1.25))}
+            onClick={() => onPxPerMsChange(Math.max(0.0003, pxPerMs / 1.25))}
             title="Zoom out"
             aria-label="Zoom out"
           >
@@ -246,7 +426,7 @@ export function VideoTimelineEditor({
           <button
             type="button"
             className="video-editor-icon-button"
-            disabled={!selectedId}
+            disabled={!selected}
             onClick={deleteSelected}
             title="Delete selected clip"
             aria-label="Delete selected clip"
@@ -263,6 +443,16 @@ export function VideoTimelineEditor({
             <Scissors size={16} />
           </button>
         </div>
+        <div className="video-timeline-toolgroup">
+          <button type="button" className="video-timeline-action-button" onClick={onAddTrack}>
+            <Plus size={15} />
+            Add track
+          </button>
+          <button type="button" className="video-timeline-action-button primary" onClick={onAddMedia}>
+            <Plus size={15} />
+            Add media
+          </button>
+        </div>
         <span className="video-timeline-playhead-label">
           Playhead {formatTimeMs(currentMs)}
         </span>
@@ -270,7 +460,10 @@ export function VideoTimelineEditor({
 
       <div className="video-timeline-shell">
         <div className="video-timeline-scroll" ref={scrollRef}>
-          <div className="video-timeline-inner" style={{ width: totalWidth }}>
+          <div
+            className="video-timeline-inner"
+            style={fitToWidth ? { width: "100%" } : { width: totalWidth }}
+          >
             <div
               className="video-timeline-ruler"
               style={{ marginLeft: LABEL_WIDTH_PX, width: timelineWidth }}
@@ -295,24 +488,23 @@ export function VideoTimelineEditor({
               <span>{formatTimeMs(currentMs)}</span>
             </div>
 
-            <div className="video-timeline-row">
-              <div className="video-timeline-lane-label">
-                <Film size={16} />
-                <span>Video</span>
-              </div>
-              <div
-                className="video-timeline-track-area video"
-                style={{ width: timelineWidth }}
-                ref={trackAreaRef}
-                onMouseDown={seekFromTrackClick}
-              >
-                <div className="timeline-video-strip" style={{ width: timelineWidth }}>
-                  {Array.from({ length: 18 }).map((_, i) => (
-                    <span key={i} />
-                  ))}
+            {extraTrackIndices.map((trackIndex) => (
+              <div className="video-timeline-row" key={`track-${trackIndex}`}>
+                <div className="video-timeline-lane-label">
+                  <Film size={16} />
+                  <span>Video {trackIndex + 1}</span>
+                </div>
+                <div
+                  className="video-timeline-track-area video extra"
+                  style={{ width: timelineWidth }}
+                  onMouseDown={seekFromTrackClick}
+                >
+                  {videoClips
+                    .filter((clip) => clip.trackIndex === trackIndex)
+                    .map(renderVideoClip)}
                 </div>
               </div>
-            </div>
+            ))}
 
             <div className="video-timeline-row">
               <div className="video-timeline-lane-label">
@@ -323,25 +515,33 @@ export function VideoTimelineEditor({
               <div
                 className="video-timeline-track-area overlays"
                 style={{ width: timelineWidth }}
+                ref={trackAreaRef}
                 onMouseDown={seekFromTrackClick}
               >
                 {clips.map((clip) => {
                   const left = clip.startMs * pxPerMs;
                   const width = Math.max(clip.durationMs * pxPerMs, 22);
-                  const selected = clip.suggestionId === selectedId;
+                  const isSelected = selectionMatches(selected, {
+                    kind: "overlay",
+                    id: clip.suggestionId,
+                  });
+                  const target: TimelineEditorSelection = {
+                    kind: "overlay",
+                    id: clip.suggestionId,
+                  };
                   const imageUrl = imageUrls[clip.suggestionId];
                   return (
                     <div
                       key={clip.suggestionId}
-                      className={`timeline-clip ${selected ? "selected" : ""}`}
+                      className={`timeline-clip ${isSelected ? "selected" : ""}`}
                       style={{ left, width }}
                       title={`${clip.title} - ${formatTimeMs(clip.startMs)}`}
                       onMouseDown={(e) => {
                         e.stopPropagation();
-                        onSelect(clip.suggestionId);
+                        onSelect(target);
                         setDrag({
                           kind: "move",
-                          clipId: clip.suggestionId,
+                          target,
                           startX: e.clientX,
                           origStartMs: clip.startMs,
                         });
@@ -351,10 +551,10 @@ export function VideoTimelineEditor({
                         className="timeline-clip-handle left"
                         onMouseDown={(e) => {
                           e.stopPropagation();
-                          onSelect(clip.suggestionId);
+                          onSelect(target);
                           setDrag({
                             kind: "resize-left",
-                            clipId: clip.suggestionId,
+                            target,
                             startX: e.clientX,
                             origStartMs: clip.startMs,
                             origDurationMs: clip.durationMs,
@@ -362,17 +562,22 @@ export function VideoTimelineEditor({
                         }}
                       />
                       {imageUrl ? (
-                        <img src={imageUrl} alt="" className="timeline-clip-thumb" draggable={false} />
+                        <img
+                          src={imageUrl}
+                          alt=""
+                          className="timeline-clip-thumb"
+                          draggable={false}
+                        />
                       ) : null}
                       <span className="timeline-clip-label">{clip.title}</span>
                       <div
                         className="timeline-clip-handle right"
                         onMouseDown={(e) => {
                           e.stopPropagation();
-                          onSelect(clip.suggestionId);
+                          onSelect(target);
                           setDrag({
                             kind: "resize-right",
-                            clipId: clip.suggestionId,
+                            target,
                             startX: e.clientX,
                             origStartMs: clip.startMs,
                             origDurationMs: clip.durationMs,
@@ -387,6 +592,22 @@ export function VideoTimelineEditor({
 
             <div className="video-timeline-row">
               <div className="video-timeline-lane-label">
+                <Film size={16} />
+                <span>Video</span>
+              </div>
+              <div
+                className="video-timeline-track-area video"
+                style={{ width: timelineWidth }}
+                onMouseDown={seekFromTrackClick}
+              >
+                <div className="timeline-base-video-clip" style={{ width: timelineWidth }}>
+                  <span>{baseVideoLabel}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="video-timeline-row">
+              <div className="video-timeline-lane-label">
                 <Music2 size={16} />
                 <span>Audio</span>
               </div>
@@ -396,20 +617,17 @@ export function VideoTimelineEditor({
                 onMouseDown={seekFromTrackClick}
               >
                 <div className="timeline-audio-wave" style={{ width: timelineWidth }}>
-                  {Array.from({ length: 96 }).map((_, i) => (
-                    <span key={i} style={{ height: audioBarHeight(i) }} />
-                  ))}
+                  {displayPeaks.length > 0
+                    ? displayPeaks.map((peak, i) => (
+                        <span
+                          key={i}
+                          style={{ height: 5 + Math.max(0.02, peak) * 35 }}
+                        />
+                      ))
+                    : Array.from({ length: 96 }).map((_, i) => (
+                        <span key={i} style={{ height: fallbackAudioBarHeight(i) }} />
+                      ))}
                 </div>
-              </div>
-            </div>
-
-            <div className="video-timeline-row add-track-row">
-              <div className="video-timeline-lane-label" />
-              <div className="video-timeline-add-track">
-                <button type="button" disabled>
-                  <Plus size={15} />
-                  Add track
-                </button>
               </div>
             </div>
           </div>
@@ -418,3 +636,5 @@ export function VideoTimelineEditor({
     </div>
   );
 }
+
+export { videoClipEndMs };

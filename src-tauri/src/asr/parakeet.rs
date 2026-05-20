@@ -1,9 +1,8 @@
-use std::path::Path;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use parakeet_rs::{ParakeetTDT, TimestampMode, Transcriber};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::asr::model_download::{missing_parakeet_files, model_dir};
 use crate::audio::ffmpeg::probe_av_stream_start_times;
@@ -324,25 +323,5 @@ pub fn transcribe_wav(
 pub fn invalidate_transcriber() {
     if let Ok(mut guard) = TRANSCRIBER.lock() {
         *guard = None;
-    }
-}
-
-pub fn wav_cache_path(app: &AppHandle, job_id: &str) -> Result<String, String> {
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("app_cache_dir_failed:{}", e))?
-        .join("transcribe");
-    std::fs::create_dir_all(&cache).map_err(|e| format!("create_cache_dir:{}", e))?;
-    Ok(cache
-        .join(format!("{job_id}.wav"))
-        .to_string_lossy()
-        .to_string())
-}
-
-pub fn cleanup_wav(path: &str) {
-    let p = Path::new(path);
-    if p.is_file() {
-        let _ = std::fs::remove_file(p);
     }
 }

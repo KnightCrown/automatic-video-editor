@@ -19,6 +19,7 @@ import {
 import type {
   FinalVideoTimeline,
   OverlayImagesManifest,
+  TimelineVideoClip,
   TranscriptAnalysis,
   VideoJob,
   VideoOverlayClip,
@@ -161,6 +162,7 @@ export function FinalVideoPage() {
     () =>
       readyVideos.map((v) => {
         const clips = timelineByVideo[v.id]?.clips ?? [];
+        const videoClips = timelineByVideo[v.id]?.videoClips ?? [];
         const imageCount = manifestByVideo[v.id]?.images.length ?? 0;
         const exportStatus = getSession(v.id).status;
         const exportSubtitle =
@@ -178,6 +180,7 @@ export function FinalVideoPage() {
               video={v}
               rootPath={project!.rootPath}
               clips={clips}
+              videoClips={videoClips}
               imageCount={imageCount}
               ffmpegOk={ffmpegOk}
               onRebuildTimeline={() => handleRebuildTimeline(v.id)}
@@ -245,10 +248,11 @@ export function FinalVideoPage() {
           video={editingVideo}
           rootPath={project.rootPath}
           initialClips={editingClips}
-          onSave={async (clips) => {
+          onSave={async ({ clips, videoClips }) => {
             const timeline: FinalVideoTimeline = {
               videoId: editingVideo.id,
               clips,
+              videoClips,
               updatedAt: new Date().toISOString(),
             };
             await saveFinalVideoTimeline(project.rootPath, timeline);
@@ -257,6 +261,11 @@ export function FinalVideoPage() {
               [editingVideo.id]: timeline,
             }));
           }}
+          initialVideoClips={
+            editingVideo && timelineByVideo[editingVideo.id]
+              ? timelineByVideo[editingVideo.id]!.videoClips ?? []
+              : []
+          }
           onClose={() => setEditingVideo(null)}
         />
       ) : null}
@@ -268,6 +277,7 @@ function FinalVideoEpisodeBody({
   video,
   rootPath,
   clips,
+  videoClips,
   imageCount,
   ffmpegOk,
   onRebuildTimeline,
@@ -276,6 +286,7 @@ function FinalVideoEpisodeBody({
   video: VideoJob;
   rootPath: string;
   clips: VideoOverlayClip[];
+  videoClips: TimelineVideoClip[];
   imageCount: number;
   ffmpegOk: boolean | null;
   onRebuildTimeline: () => Promise<FinalVideoTimeline | null>;
@@ -292,8 +303,9 @@ function FinalVideoEpisodeBody({
       fileName: video.fileName,
       rootPath,
       clips,
+      videoClips,
     });
-  }, [clips, rootPath, startExport, video.fileName, video.id]);
+  }, [clips, rootPath, startExport, video.fileName, video.id, videoClips]);
 
   const handleCancelExport = useCallback(() => {
     void cancelExport(video.id);

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   Check,
   ChevronDown,
@@ -10,8 +17,16 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
-import type { OverlayClipLayout, VideoJob, VideoOverlayClip } from "../../types/pipeline";
-import { getOverlayImageDisplayUrl } from "../../services/pipelineService";
+import { open } from "@tauri-apps/plugin-dialog";
+import type {
+  AudioWaveform,
+  FinalVideoTimeline,
+  OverlayClipLayout,
+  TimelineVideoClip,
+  VideoJob,
+  VideoOverlayClip,
+} from "../../types/pipeline";
+import { getOverlayImageDisplayUrl, importTimelineVideo } from "../../services/pipelineService";
 import { clipEndMs, formatTimeMs } from "../../utils/overlayClips";
 import {
   editorRectToLayout,
@@ -22,7 +37,15 @@ import {
   VideoPreviewWithOverlays,
   type VideoPreviewHandle,
 } from "./VideoPreviewWithOverlays";
-import { VideoTimelineEditor } from "./VideoTimelineEditor";
+import {
+  VideoTimelineEditor,
+  type TimelineEditorSelection,
+} from "./VideoTimelineEditor";
+import {
+  maxVideoTrackIndex,
+  normalizeVideoClip,
+  videoClipEndMs,
+} from "../../utils/timelineVideoClips";
 
 const TIME_STEP_MS = 500;
 
@@ -30,10 +53,12 @@ type Props = {
   video: VideoJob;
   rootPath: string;
   initialClips: VideoOverlayClip[];
-  onSave: (clips: VideoOverlayClip[]) => Promise<void>;
+  initialVideoClips?: TimelineVideoClip[];
+  onSave: (timeline: Pick<FinalVideoTimeline, "clips" | "videoClips">) => Promise<void>;
   onClose: () => void;
   isQueued?: boolean;
   onAddToRenderQueue?: () => void;
+  audioWaveform?: AudioWaveform | null;
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -70,24 +95,37 @@ export function VideoEditorModal({
   video,
   rootPath,
   initialClips,
+  initialVideoClips = [],
   onSave,
   onClose,
   isQueued = false,
   onAddToRenderQueue,
+  audioWaveform = null,
 }: Props) {
   const previewRef = useRef<VideoPreviewHandle>(null);
+  const overlayListRef = useRef<HTMLDivElement>(null);
+  const overlayScrollRef = useRef<{
+    startX: number;
+    scrollLeft: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressOverlayClickRef = useRef(false);
   const [clips, setClips] = useState<VideoOverlayClip[]>(() =>
     initialClips.map(normalizeClip),
   );
+  const [videoClips, setVideoClips] = useState<TimelineVideoClip[]>(() =>
+    initialVideoClips.map(normalizeVideoClip),
+  );
+  const [emptyTrackIndices, setEmptyTrackIndices] = useState<number[]>([]);
   const [currentMs, setCurrentMs] = useState(0);
   const [durationMs, setDurationMs] = useState(0);
-  const [selectedId, setSelectedId] = useState<string | null>(
-    initialClips[0]?.suggestionId ?? null,
-  );
-  const [pxPerMs, setPxPerMs] = useState(0.05);
+  const [selected, setSelected] = useState<TimelineEditorSelection | null>(() => {
+    const first = initialClips[0];
+    return first ? { kind: "overlay", id: first.suggestionId } : null;
+  });
+  const [pxPerMs, setPxPerMs] = useState(0.001);
   const [saving, setSaving] = useState(false);
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
-  const [draggedOverlayId, setDraggedOverlayId] = useState<string | null>(null);
   const [resolution, setResolution] = useState("1080p");
   const [fps, setFps] = useState("30");
   const [format, setFormat] = useState("MP4");
@@ -96,14 +134,17 @@ export function VideoEditorModal({
 
   useEffect(() => {
     const nextClips = initialClips.map(normalizeClip);
+    const nextVideoClips = initialVideoClips.map(normalizeVideoClip);
     const first = nextClips[0] ?? null;
     setClips(nextClips);
-    setSelectedId(first?.suggestionId ?? null);
+    setVideoClips(nextVideoClips);
+    setEmptyTrackIndices([]);
+    setSelected(first ? { kind: "overlay", id: first.suggestionId } : null);
     setCurrentMs(first?.startMs ?? 0);
     window.setTimeout(() => {
       if (first) previewRef.current?.seekToMs(first.startMs);
     }, 0);
-  }, [video.id, initialClips]);
+  }, [video.id, initialClips, initialVideoClips]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,14 +163,28 @@ export function VideoEditorModal({
   }, [clips, rootPath]);
 
   const safeDurationMs = useMemo(() => {
-    const clipMax = clips.reduce((max, clip) => Math.max(max, clipEndMs(clip)), 0);
-    return Math.max(durationMs || 0, clipMax, 60_000);
-  }, [clips, durationMs]);
+    const overlayMax = clips.reduce((max, clip) => Math.max(max, clipEndMs(clip)), 0);
+    const videoMax = videoClips.reduce((max, clip) => Math.max(max, videoClipEndMs(clip)), 0);
+    return Math.max(durationMs || 0, overlayMax, videoMax, 60_000);
+  }, [clips, durationMs, videoClips]);
 
-  const selectedClip = useMemo(
-    () => clips.find((clip) => clip.suggestionId === selectedId) ?? null,
-    [clips, selectedId],
+  const selectedOverlay = useMemo(
+    () =>
+      selected?.kind === "overlay"
+        ? (clips.find((clip) => clip.suggestionId === selected.id) ?? null)
+        : null,
+    [clips, selected],
   );
+
+  const selectedVideoClip = useMemo(
+    () =>
+      selected?.kind === "video"
+        ? (videoClips.find((clip) => clip.id === selected.id) ?? null)
+        : null,
+    [selected, videoClips],
+  );
+
+  const selectedOverlayId = selected?.kind === "overlay" ? selected.id : null;
 
   const handleSeek = useCallback(
     (ms: number) => {
@@ -146,25 +201,39 @@ export function VideoEditorModal({
     );
   }, []);
 
-  const updateSelectedClip = useCallback(
+  const updateSelectedOverlay = useCallback(
     (patch: Partial<VideoOverlayClip>) => {
-      if (!selectedClip) return;
-      updateClip(selectedClip.suggestionId, patch);
+      if (!selectedOverlay) return;
+      updateClip(selectedOverlay.suggestionId, patch);
     },
-    [selectedClip, updateClip],
+    [selectedOverlay, updateClip],
+  );
+
+  const updateVideoClip = useCallback((clipId: string, patch: Partial<TimelineVideoClip>) => {
+    setVideoClips((current) =>
+      current.map((clip) => (clip.id === clipId ? { ...clip, ...patch } : clip)),
+    );
+  }, []);
+
+  const updateSelectedVideoClip = useCallback(
+    (patch: Partial<TimelineVideoClip>) => {
+      if (!selectedVideoClip) return;
+      updateVideoClip(selectedVideoClip.id, patch);
+    },
+    [selectedVideoClip, updateVideoClip],
   );
 
   const saveTimeline = useCallback(
     async (closeAfterSave: boolean) => {
       setSaving(true);
       try {
-        await onSave(clips);
+        await onSave({ clips, videoClips });
         if (closeAfterSave) onClose();
       } finally {
         setSaving(false);
       }
     },
-    [clips, onClose, onSave],
+    [clips, onClose, onSave, videoClips],
   );
 
   const handleAddToRenderQueue = useCallback(async () => {
@@ -174,67 +243,142 @@ export function VideoEditorModal({
 
   const handleOverlayCardClick = useCallback(
     (clip: VideoOverlayClip) => {
-      setSelectedId(clip.suggestionId);
+      if (suppressOverlayClickRef.current) {
+        suppressOverlayClickRef.current = false;
+        return;
+      }
+      setSelected({ kind: "overlay", id: clip.suggestionId });
       handleSeek(clip.startMs);
     },
     [handleSeek],
   );
 
-  const handleOverlayDrop = useCallback(
-    (targetId: string) => {
-      if (!draggedOverlayId || draggedOverlayId === targetId) return;
-      setClips((current) => {
-        const from = current.findIndex((clip) => clip.suggestionId === draggedOverlayId);
-        const to = current.findIndex((clip) => clip.suggestionId === targetId);
-        if (from < 0 || to < 0) return current;
-        const next = [...current];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        return next;
-      });
-      setDraggedOverlayId(null);
+  const handleOverlayListPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const list = overlayListRef.current;
+      if (!list) return;
+      overlayScrollRef.current = {
+        startX: e.clientX,
+        scrollLeft: list.scrollLeft,
+        moved: false,
+      };
+      list.setPointerCapture?.(e.pointerId);
     },
-    [draggedOverlayId],
+    [],
+  );
+
+  const handleOverlayListPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = overlayScrollRef.current;
+      const list = overlayListRef.current;
+      if (!drag || !list) return;
+      const dx = e.clientX - drag.startX;
+      if (Math.abs(dx) > 4) {
+        drag.moved = true;
+        list.classList.add("dragging");
+        e.preventDefault();
+      }
+      list.scrollLeft = drag.scrollLeft - dx;
+    },
+    [],
+  );
+
+  const handleOverlayListPointerUp = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = overlayScrollRef.current;
+      const list = overlayListRef.current;
+      if (drag?.moved) {
+        suppressOverlayClickRef.current = true;
+        window.setTimeout(() => {
+          suppressOverlayClickRef.current = false;
+        }, 0);
+      }
+      overlayScrollRef.current = null;
+      list?.classList.remove("dragging");
+      list?.releasePointerCapture?.(e.pointerId);
+    },
+    [],
   );
 
   const adjustSelectedStart = useCallback(
     (deltaMs: number) => {
-      if (!selectedClip) return;
-      const maxStart = Math.max(0, safeDurationMs - selectedClip.durationMs);
-      updateSelectedClip({
-        startMs: clamp(selectedClip.startMs + deltaMs, 0, maxStart),
+      if (selectedOverlay) {
+        const maxStart = Math.max(0, safeDurationMs - selectedOverlay.durationMs);
+        updateSelectedOverlay({
+          startMs: clamp(selectedOverlay.startMs + deltaMs, 0, maxStart),
+        });
+        return;
+      }
+      if (!selectedVideoClip) return;
+      const maxStart = Math.max(0, safeDurationMs - selectedVideoClip.durationMs);
+      updateSelectedVideoClip({
+        startMs: clamp(selectedVideoClip.startMs + deltaMs, 0, maxStart),
       });
     },
-    [safeDurationMs, selectedClip, updateSelectedClip],
+    [safeDurationMs, selectedOverlay, selectedVideoClip, updateSelectedOverlay, updateSelectedVideoClip],
   );
 
   const adjustSelectedDuration = useCallback(
     (deltaMs: number) => {
-      if (!selectedClip) return;
-      updateSelectedClip({
-        durationMs: clamp(
-          selectedClip.durationMs + deltaMs,
-          TIME_STEP_MS,
-          safeDurationMs - selectedClip.startMs,
-        ),
+      if (selectedOverlay) {
+        updateSelectedOverlay({
+          durationMs: clamp(
+            selectedOverlay.durationMs + deltaMs,
+            TIME_STEP_MS,
+            safeDurationMs - selectedOverlay.startMs,
+          ),
+        });
+        return;
+      }
+      if (!selectedVideoClip) return;
+      const trimStart = selectedVideoClip.trimStartMs ?? 0;
+      const maxDuration = Math.min(
+        selectedVideoClip.sourceDurationMs - trimStart,
+        safeDurationMs - selectedVideoClip.startMs,
+      );
+      updateSelectedVideoClip({
+        durationMs: clamp(selectedVideoClip.durationMs + deltaMs, TIME_STEP_MS, maxDuration),
       });
     },
-    [safeDurationMs, selectedClip, updateSelectedClip],
+    [safeDurationMs, selectedOverlay, selectedVideoClip, updateSelectedOverlay, updateSelectedVideoClip],
   );
 
   const adjustSelectedEnd = useCallback(
     (deltaMs: number) => {
-      if (!selectedClip) return;
-      const nextEnd = clamp(clipEndMs(selectedClip) + deltaMs, selectedClip.startMs + TIME_STEP_MS, safeDurationMs);
-      updateSelectedClip({ durationMs: nextEnd - selectedClip.startMs });
+      if (selectedOverlay) {
+        const nextEnd = clamp(
+          clipEndMs(selectedOverlay) + deltaMs,
+          selectedOverlay.startMs + TIME_STEP_MS,
+          safeDurationMs,
+        );
+        updateSelectedOverlay({ durationMs: nextEnd - selectedOverlay.startMs });
+        return;
+      }
+      if (!selectedVideoClip) return;
+      const trimStart = selectedVideoClip.trimStartMs ?? 0;
+      const maxEnd = Math.min(
+        safeDurationMs,
+        selectedVideoClip.startMs +
+          Math.min(
+            selectedVideoClip.sourceDurationMs - trimStart,
+            safeDurationMs - selectedVideoClip.startMs,
+          ),
+      );
+      const nextEnd = clamp(
+        videoClipEndMs(selectedVideoClip) + deltaMs,
+        selectedVideoClip.startMs + TIME_STEP_MS,
+        maxEnd,
+      );
+      updateSelectedVideoClip({ durationMs: nextEnd - selectedVideoClip.startMs });
     },
-    [safeDurationMs, selectedClip, updateSelectedClip],
+    [safeDurationMs, selectedOverlay, selectedVideoClip, updateSelectedOverlay, updateSelectedVideoClip],
   );
 
   const applyPositionPreset = useCallback(
     (x: "left" | "center" | "right", y: "top" | "center" | "bottom") => {
-      if (!selectedClip) return;
-      const widthPct = selectedClip.layout.widthPct;
+      if (!selectedOverlay) return;
+      const widthPct = selectedOverlay.layout.widthPct;
       const heightPct = overlayHeightPct(widthPct);
       const xPct =
         x === "left"
@@ -248,11 +392,11 @@ export function VideoEditorModal({
           : y === "center"
             ? (100 - heightPct) / 2
             : 100 - heightPct - 3;
-      updateSelectedClip({
+      updateSelectedOverlay({
         layout: editorRectToLayout({ xPct, yPct, widthPct }),
       });
     },
-    [selectedClip, updateSelectedClip],
+    [selectedOverlay, updateSelectedOverlay],
   );
 
   const updateClipLayout = useCallback(
@@ -264,20 +408,56 @@ export function VideoEditorModal({
 
   const updateSelectedScale = useCallback(
     (widthPct: number) => {
-      if (!selectedClip) return;
-      const rect = layoutToEditorRect(selectedClip.layout);
-      updateSelectedClip({
+      if (!selectedOverlay) return;
+      const rect = layoutToEditorRect(selectedOverlay.layout);
+      updateSelectedOverlay({
         layout: editorRectToLayout({ ...rect, widthPct }),
       });
     },
-    [selectedClip, updateSelectedClip],
+    [selectedOverlay, updateSelectedOverlay],
   );
 
   const resetSelectedClip = useCallback(() => {
-    if (!selectedClip) return;
-    const original = initialClips.find((clip) => clip.suggestionId === selectedClip.suggestionId);
-    if (original) updateClip(selectedClip.suggestionId, normalizeClip(original));
-  }, [initialClips, selectedClip, updateClip]);
+    if (selectedOverlay) {
+      const original = initialClips.find(
+        (clip) => clip.suggestionId === selectedOverlay.suggestionId,
+      );
+      if (original) updateClip(selectedOverlay.suggestionId, normalizeClip(original));
+      return;
+    }
+    if (!selectedVideoClip) return;
+    const original = initialVideoClips.find((clip) => clip.id === selectedVideoClip.id);
+    if (original) updateVideoClip(selectedVideoClip.id, normalizeVideoClip(original));
+  }, [initialClips, initialVideoClips, selectedOverlay, selectedVideoClip, updateClip, updateVideoClip]);
+
+  const handleAddTrack = useCallback(() => {
+    const nextIndex = maxVideoTrackIndex(videoClips, emptyTrackIndices) + 1;
+    setEmptyTrackIndices((current) => [...current, nextIndex]);
+  }, [emptyTrackIndices, videoClips]);
+
+  const handleAddMedia = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Video", extensions: ["mp4", "mov", "mkv", "webm", "m4v"] }],
+    });
+    if (!selected || typeof selected !== "string") return;
+
+    try {
+      const imported = await importTimelineVideo(rootPath, video.id, selected);
+      const nextTrackIndex = maxVideoTrackIndex(videoClips, emptyTrackIndices) + 1;
+      const clip: TimelineVideoClip = {
+        ...normalizeVideoClip(imported),
+        trackIndex: nextTrackIndex,
+        startMs: currentMs,
+        durationMs: Math.min(imported.sourceDurationMs, safeDurationMs - currentMs),
+      };
+      setVideoClips((current) => [...current, clip]);
+      setEmptyTrackIndices((current) => current.filter((idx) => idx !== nextTrackIndex));
+      setSelected({ kind: "video", id: clip.id });
+    } catch (err) {
+      console.error("Failed to import timeline video:", err);
+    }
+  }, [currentMs, emptyTrackIndices, rootPath, safeDurationMs, video.id, videoClips]);
 
   const estimatedMb = estimateFileSizeMb(safeDurationMs, clips.length, quality);
 
@@ -290,15 +470,15 @@ export function VideoEditorModal({
         aria-labelledby="video-editor-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="video-editor-shell-header">
-          <div className="video-editor-title-block">
-            <h2 id="video-editor-title">Edit</h2>
-            <p>Fine-tune your timeline and export your final video.</p>
-            <button type="button" className="video-editor-file-select">
-              <span>{video.fileName}</span>
-              <ChevronDown size={16} />
-            </button>
-          </div>
+        <header className="video-editor-shell-header video-editor-shell-header-inline">
+          <h2 id="video-editor-title">Edit</h2>
+          <p className="video-editor-header-subtitle">
+            Fine-tune your timeline and export your final video.
+          </p>
+          <button type="button" className="video-editor-file-select">
+            <span>{video.fileName}</span>
+            <ChevronDown size={16} />
+          </button>
 
           <div className="video-editor-header-actions">
             <span className="video-editor-save-state">
@@ -339,53 +519,62 @@ export function VideoEditorModal({
               onDurationChange={setDurationMs}
               showSeekMarkers
               interactiveOverlays
-              selectedClipId={selectedId}
-              onSelectClip={setSelectedId}
+              selectedClipId={selectedOverlayId}
+              onSelectClip={(id) => setSelected(id ? { kind: "overlay", id } : null)}
               onClipLayoutChange={updateClipLayout}
             />
 
             <VideoTimelineEditor
               clips={clips}
+              videoClips={videoClips}
+              emptyTrackIndices={emptyTrackIndices}
               durationMs={safeDurationMs}
               currentMs={currentMs}
-              selectedId={selectedId}
+              selected={selected}
               pxPerMs={pxPerMs}
+              baseVideoLabel={video.fileName}
               imageUrls={imageUrls}
+              audioWaveform={audioWaveform}
               fitToWidth
               onClipsChange={setClips}
-              onSelect={setSelectedId}
+              onVideoClipsChange={setVideoClips}
+              onSelect={setSelected}
               onSeek={handleSeek}
               onPxPerMsChange={setPxPerMs}
+              onAddTrack={handleAddTrack}
+              onAddMedia={() => void handleAddMedia()}
             />
 
             <section className="video-overlay-list-panel">
               <div className="video-overlay-list-header">
                 <h3>Overlay list ({clips.length})</h3>
-                <span>Drag cards to change layer order</span>
+                <span>Drag sideways to scroll</span>
               </div>
-              <div className="video-overlay-list" role="list" aria-label="Overlay list">
+              <div
+                ref={overlayListRef}
+                className="video-overlay-list"
+                role="list"
+                aria-label="Overlay list"
+                onPointerDown={handleOverlayListPointerDown}
+                onPointerMove={handleOverlayListPointerMove}
+                onPointerUp={handleOverlayListPointerUp}
+                onPointerCancel={handleOverlayListPointerUp}
+                onWheel={(e) => {
+                  const list = overlayListRef.current;
+                  if (!list || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+                  list.scrollLeft += e.deltaY;
+                }}
+              >
                 {clips.map((clip, index) => (
                   <div
                     key={clip.suggestionId}
                     className={`video-overlay-card ${
-                      selectedId === clip.suggestionId ? "selected" : ""
+                      selected?.kind === "overlay" && selected.id === clip.suggestionId
+                        ? "selected"
+                        : ""
                     }`}
                     role="listitem"
-                    draggable
                     onClick={() => handleOverlayCardClick(clip)}
-                    onDragStart={(e: DragEvent<HTMLDivElement>) => {
-                      setDraggedOverlayId(clip.suggestionId);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = "move";
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      handleOverlayDrop(clip.suggestionId);
-                    }}
-                    onDragEnd={() => setDraggedOverlayId(null)}
                   >
                     <span className="video-overlay-card-index">{index + 1}</span>
                     <div className="video-overlay-card-thumb">
@@ -407,24 +596,73 @@ export function VideoEditorModal({
 
           <aside className="video-editor-inspector">
             <section className="video-editor-panel">
-              <h3>Overlay Settings</h3>
-              {selectedClip ? (
+              <h3>{selectedVideoClip ? "Video Settings" : "Overlay Settings"}</h3>
+              {selectedVideoClip ? (
                 <>
                   <TimeStepper
                     label="Start time"
-                    value={formatTimecodeMs(selectedClip.startMs)}
+                    value={formatTimecodeMs(selectedVideoClip.startMs)}
                     onDecrement={() => adjustSelectedStart(-TIME_STEP_MS)}
                     onIncrement={() => adjustSelectedStart(TIME_STEP_MS)}
                   />
                   <TimeStepper
                     label="End time"
-                    value={formatTimecodeMs(clipEndMs(selectedClip))}
+                    value={formatTimecodeMs(videoClipEndMs(selectedVideoClip))}
                     onDecrement={() => adjustSelectedEnd(-TIME_STEP_MS)}
                     onIncrement={() => adjustSelectedEnd(TIME_STEP_MS)}
                   />
                   <TimeStepper
                     label="Duration"
-                    value={formatTimecodeMs(selectedClip.durationMs)}
+                    value={formatTimecodeMs(selectedVideoClip.durationMs)}
+                    onDecrement={() => adjustSelectedDuration(-TIME_STEP_MS)}
+                    onIncrement={() => adjustSelectedDuration(TIME_STEP_MS)}
+                  />
+                  <SliderRow
+                    label="Scale"
+                    value={Math.round(selectedVideoClip.scalePct ?? 100)}
+                    min={12}
+                    max={100}
+                    suffix="%"
+                    onChange={(value) => updateSelectedVideoClip({ scalePct: value })}
+                  />
+                  <SliderRow
+                    label="Opacity"
+                    value={Math.round(selectedVideoClip.opacityPct ?? 100)}
+                    min={0}
+                    max={100}
+                    suffix="%"
+                    onChange={(value) => updateSelectedVideoClip({ opacityPct: value })}
+                  />
+                  <SliderRow
+                    label="Volume"
+                    value={Math.round(selectedVideoClip.volumePct ?? 100)}
+                    min={0}
+                    max={100}
+                    suffix="%"
+                    onChange={(value) => updateSelectedVideoClip({ volumePct: value })}
+                  />
+                  <button type="button" className="video-editor-reset-button" onClick={resetSelectedClip}>
+                    <RotateCcw size={15} />
+                    Reset changes
+                  </button>
+                </>
+              ) : selectedOverlay ? (
+                <>
+                  <TimeStepper
+                    label="Start time"
+                    value={formatTimecodeMs(selectedOverlay.startMs)}
+                    onDecrement={() => adjustSelectedStart(-TIME_STEP_MS)}
+                    onIncrement={() => adjustSelectedStart(TIME_STEP_MS)}
+                  />
+                  <TimeStepper
+                    label="End time"
+                    value={formatTimecodeMs(clipEndMs(selectedOverlay))}
+                    onDecrement={() => adjustSelectedEnd(-TIME_STEP_MS)}
+                    onIncrement={() => adjustSelectedEnd(TIME_STEP_MS)}
+                  />
+                  <TimeStepper
+                    label="Duration"
+                    value={formatTimecodeMs(selectedOverlay.durationMs)}
                     onDecrement={() => adjustSelectedDuration(-TIME_STEP_MS)}
                     onIncrement={() => adjustSelectedDuration(TIME_STEP_MS)}
                   />
@@ -447,7 +685,7 @@ export function VideoEditorModal({
 
                   <SliderRow
                     label="Scale"
-                    value={Math.round(selectedClip.layout.widthPct)}
+                    value={Math.round(selectedOverlay.layout.widthPct)}
                     min={12}
                     max={85}
                     suffix="%"
@@ -455,17 +693,17 @@ export function VideoEditorModal({
                   />
                   <SliderRow
                     label="Opacity"
-                    value={Math.round(selectedClip.opacityPct ?? 100)}
+                    value={Math.round(selectedOverlay.opacityPct ?? 100)}
                     min={0}
                     max={100}
                     suffix="%"
-                    onChange={(value) => updateSelectedClip({ opacityPct: value })}
+                    onChange={(value) => updateSelectedOverlay({ opacityPct: value })}
                   />
                   <EditorSelect
                     label="Entrance"
-                    value={selectedClip.entrance ?? "fade-in"}
+                    value={selectedOverlay.entrance ?? "fade-in"}
                     onChange={(value) =>
-                      updateSelectedClip({
+                      updateSelectedOverlay({
                         entrance: value as VideoOverlayClip["entrance"],
                       })
                     }
@@ -476,9 +714,9 @@ export function VideoEditorModal({
                   />
                   <EditorSelect
                     label="Exit"
-                    value={selectedClip.exit ?? "fade-out"}
+                    value={selectedOverlay.exit ?? "fade-out"}
                     onChange={(value) =>
-                      updateSelectedClip({
+                      updateSelectedOverlay({
                         exit: value as VideoOverlayClip["exit"],
                       })
                     }
@@ -493,7 +731,7 @@ export function VideoEditorModal({
                   </button>
                 </>
               ) : (
-                <p className="video-editor-empty-panel">Select an overlay on the timeline or list.</p>
+                <p className="video-editor-empty-panel">Select a clip on the timeline or list.</p>
               )}
             </section>
 

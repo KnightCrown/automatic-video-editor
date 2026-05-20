@@ -209,10 +209,38 @@ export interface VideoOverlayClip {
   exit?: "none" | "fade-out";
 }
 
+/** An extra video clip placed on a timeline track above the base episode. */
+export interface TimelineVideoClip {
+  id: string;
+  /** Path relative to the project root. */
+  sourceRelativePath: string;
+  fileName: string;
+  startMs: number;
+  durationMs: number;
+  sourceDurationMs: number;
+  trimStartMs?: number;
+  scalePct?: number;
+  opacityPct?: number;
+  volumePct?: number;
+  /** 1 = first track above base video; higher = further up the stack. */
+  trackIndex: number;
+}
+
 export interface FinalVideoTimeline {
   videoId: string;
   clips: VideoOverlayClip[];
+  videoClips?: TimelineVideoClip[];
   updatedAt: string;
+}
+
+export interface AudioWaveform {
+  videoId: string;
+  generatedAt: string;
+  sourcePath: string;
+  sourceModifiedMs?: number;
+  durationMs: number;
+  bucketDurationMs: number;
+  peaks: number[];
 }
 
 export interface FinalVideoExport {

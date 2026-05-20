@@ -122,6 +122,7 @@ pub fn build_default_timeline(
     Ok(FinalVideoTimeline {
         video_id: video_id.to_string(),
         clips,
+        video_clips: Vec::new(),
         updated_at: Utc::now().to_rfc3339(),
     })
 }

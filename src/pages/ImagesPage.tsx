@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useProject } from "../context/ProjectContext";
 import { EpisodeAccordion, type EpisodePanelSpec } from "../components/EpisodeAccordion";
 import {
+  ensureAudioWaveform,
   generateOverlayImages,
   getOverlayImageDisplayUrl,
   getOverlayImagesManifest,
@@ -158,6 +159,14 @@ export function ImagesPage() {
           videoId,
           [...ids],
         );
+        setCreateProgress(
+          `Generating audio peak waveform ${i + 1} of ${jobs.length}${video ? `: ${video.fileName}` : ""}...`,
+        );
+        try {
+          await ensureAudioWaveform(project.rootPath, videoId);
+        } catch (waveformErr) {
+          console.warn("Could not pre-generate audio waveform", waveformErr);
+        }
         createdIds.push(videoId);
       }
       navigate("/final-video", { state: { createdVideoIds: createdIds } });

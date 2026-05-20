@@ -7,12 +7,16 @@ use tokio::process::Command as TokioCommand;
 
 use crate::audio::ffmpeg::resolve_ffmpeg_executable;
 use crate::image::overlay_images::resolve_project_image_absolute_path;
-use crate::types::{ProjectSettings, VideoExportEncoderKind, VideoExportProgress, VideoOverlayClip};
+use crate::types::{
+    ProjectSettings, TimelineVideoClip, VideoExportEncoderKind, VideoExportProgress,
+    VideoOverlayClip,
+};
 use crate::video::encoders::{
     build_video_encoder_args, discover_video_export_capabilities, probe_audio_copy_safe,
     probe_video_duration_sec, resolve_encoder_for_export, use_cuda_overlay_path,
 };
 use crate::video::export_session::{wait_child_or_cancel, VideoExportController};
+use crate::video::timeline_media::resolve_timeline_media_absolute;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportPathKind {
@@ -113,12 +117,22 @@ fn overlay_input_filter(
 }
 
 fn build_cpu_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u32) -> String {
+    build_cpu_filter_complex_on_base(clips, video_w, video_h, "[0:v]", "vout")
+}
+
+fn build_cpu_filter_complex_on_base(
+    clips: &[VideoOverlayClip],
+    video_w: u32,
+    video_h: u32,
+    base_video_label: &str,
+    final_out_label: &str,
+) -> String {
     if clips.is_empty() {
-        return "[0:v]copy[vout]".to_string();
+        return format!("{base_video_label}copy[{final_out_label}]");
     }
 
     let mut filter_parts: Vec<String> = Vec::new();
-    let mut last_label = "[0:v]".to_string();
+    let mut last_label = base_video_label.to_string();
 
     for (i, clip) in clips.iter().enumerate() {
         let input_idx = i + 1;
@@ -139,7 +153,7 @@ fn build_cpu_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u
             false,
         ));
         let out_label = if i == clips.len() - 1 {
-            "vout".to_string()
+            final_out_label.to_string()
         } else {
             format!("v{i}")
         };
@@ -156,6 +170,125 @@ fn build_cpu_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u
     }
 
     filter_parts.join(";")
+}
+
+fn extra_video_scale_pct(clip: &TimelineVideoClip) -> f64 {
+    clip.scale_pct.unwrap_or(100.0).clamp(12.0, 100.0)
+}
+
+fn extra_video_opacity(clip: &TimelineVideoClip) -> f64 {
+    (clip.opacity_pct.unwrap_or(100.0) / 100.0).clamp(0.0, 1.0)
+}
+
+fn build_extra_video_video_chain(
+    video_clips: &[TimelineVideoClip],
+    extra_input_start: usize,
+    video_w: u32,
+    video_h: u32,
+    base_video_label: &str,
+    final_out_label: &str,
+) -> Vec<String> {
+    if video_clips.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted: Vec<&TimelineVideoClip> = video_clips.iter().collect();
+    sorted.sort_by_key(|c| c.track_index);
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut last_label = base_video_label.to_string();
+
+    for (i, clip) in sorted.iter().enumerate() {
+        let input_idx = extra_input_start + i;
+        let trim_start = ms_to_sec(clip.trim_start_ms.unwrap_or(0));
+        let duration = ms_to_sec(clip.duration_ms).max(0.001);
+        let start = ms_to_sec(clip.start_ms);
+        let end = ms_to_sec(clip.start_ms.saturating_add(clip.duration_ms));
+        let scale_pct = extra_video_scale_pct(clip);
+        let opacity = extra_video_opacity(clip);
+        let prep = format!("vclip{i}");
+        let (overlay_x, overlay_y) = if scale_pct >= 99.5 {
+            ("0".to_string(), "0".to_string())
+        } else {
+            ("(main_w-overlay_w)/2".to_string(), "(main_h-overlay_h)/2".to_string())
+        };
+
+        if scale_pct >= 99.5 {
+            parts.push(format!(
+                "[{input_idx}:v]trim=start={trim_start}:duration={duration},setpts=PTS-STARTPTS,scale={video_w}:{video_h}:force_original_aspect_ratio=decrease,pad={video_w}:{video_h}:(ow-iw)/2:(oh-ih)/2,format=rgba,colorchannelmixer=aa={opacity:.3},setpts=PTS+{start}/TB[{prep}]"
+            ));
+        } else {
+            let overlay_w = ((video_w as f64) * (scale_pct / 100.0)).round().max(1.0) as u32;
+            parts.push(format!(
+                "[{input_idx}:v]trim=start={trim_start}:duration={duration},setpts=PTS-STARTPTS,scale={overlay_w}:-1,format=rgba,colorchannelmixer=aa={opacity:.3},setpts=PTS+{start}/TB[{prep}]"
+            ));
+        }
+
+        let out = if i == sorted.len() - 1 {
+            final_out_label.to_string()
+        } else {
+            format!("vb{i}")
+        };
+        parts.push(format!(
+            "{last}[{prep}]overlay=x={overlay_x}:y={overlay_y}:enable='between(t,{start},{end})'[{out}]",
+            last = last_label,
+            prep = prep,
+            overlay_x = overlay_x,
+            overlay_y = overlay_y,
+            start = start,
+            end = end,
+            out = out,
+        ));
+        last_label = format!("[{out}]");
+    }
+
+    parts
+}
+
+fn build_full_cpu_filter_complex(
+    overlay_clips: &[VideoOverlayClip],
+    video_clips: &[TimelineVideoClip],
+    _overlay_input_start: usize,
+    extra_input_start: usize,
+    video_w: u32,
+    video_h: u32,
+) -> String {
+    if overlay_clips.is_empty() && video_clips.is_empty() {
+        return "[0:v]copy[vout]".to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    let layer_after_overlays = if overlay_clips.is_empty() {
+        "[0:v]".to_string()
+    } else {
+        let overlay_out = if video_clips.is_empty() {
+            "vout"
+        } else {
+            "voverlays"
+        };
+        parts.push(build_cpu_filter_complex_on_base(
+            overlay_clips,
+            video_w,
+            video_h,
+            "[0:v]",
+            overlay_out,
+        ));
+        format!("[{overlay_out}]")
+    };
+
+    if !video_clips.is_empty() {
+        parts.extend(build_extra_video_video_chain(
+            video_clips,
+            extra_input_start,
+            video_w,
+            video_h,
+            &layer_after_overlays,
+            "vout",
+        ));
+    }
+
+    parts.join(";")
 }
 
 fn build_cuda_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: u32) -> String {
@@ -228,10 +361,23 @@ fn push_overlay_inputs(args: &mut Vec<String>, image_paths: &[PathBuf]) {
     }
 }
 
+fn push_video_clip_inputs(args: &mut Vec<String>, video_paths: &[PathBuf]) {
+    for p in video_paths {
+        args.push("-i".into());
+        args.push(p.to_string_lossy().into_owned());
+    }
+}
+
+fn needs_filter_complex(clips: &[VideoOverlayClip], video_clips: &[TimelineVideoClip]) -> bool {
+    !clips.is_empty() || !video_clips.is_empty()
+}
+
 fn build_export_runs(
     video_path: &str,
     image_paths: &[PathBuf],
+    extra_video_paths: &[PathBuf],
     clips: &[VideoOverlayClip],
+    video_clips: &[TimelineVideoClip],
     video_w: u32,
     video_h: u32,
     output_path: &str,
@@ -244,6 +390,9 @@ fn build_export_runs(
     let duration_sec = probe_video_duration_sec(video_path).unwrap_or(1.0).max(0.1);
     let mode = settings.video_export_mode.as_str();
     let mut runs: Vec<ExportRun> = Vec::new();
+    let overlay_input_start = 1usize;
+    let extra_input_start = 1 + image_paths.len();
+    let use_filters = needs_filter_complex(clips, video_clips);
 
     let hw_encoder = if encoder == VideoExportEncoderKind::Software {
         None
@@ -253,7 +402,11 @@ fn build_export_runs(
 
     let try_hw_paths = mode != "software";
 
-    if try_hw_paths && use_cuda_overlay_path(settings, preflight, encoder) && !clips.is_empty() {
+    if try_hw_paths
+        && use_cuda_overlay_path(settings, preflight, encoder)
+        && !clips.is_empty()
+        && video_clips.is_empty()
+    {
         let mut args = vec![
             "-y".into(),
             "-hwaccel".into(),
@@ -283,44 +436,62 @@ fn build_export_runs(
 
     if try_hw_paths {
         if let Some(hw) = hw_encoder {
-        let mut args = vec!["-y".into(), "-i".into(), video_path.to_string()];
-        push_overlay_inputs(&mut args, image_paths);
-        if clips.is_empty() {
-            args.push("-map".into());
-            args.push("0:v".into());
-            args.extend(build_video_encoder_args(hw, fast));
-            args.extend(audio_args(audio_copy));
-            args.push(output_path.to_string());
-        } else {
-            args.push("-filter_complex".into());
-            args.push(build_cpu_filter_complex(clips, video_w, video_h));
-            args.push("-map".into());
-            args.push("[vout]".into());
-            args.extend(audio_args(audio_copy));
-            args.extend(build_video_encoder_args(hw, fast));
-            args.push("-shortest".into());
-            args.push(output_path.to_string());
-        }
-        runs.push(ExportRun {
-            path_kind: ExportPathKind::CpuOverlayHw,
-            stage: "encode_hw",
-            args,
-            duration_sec,
-        });
+            let mut args = vec!["-y".into(), "-i".into(), video_path.to_string()];
+            push_overlay_inputs(&mut args, image_paths);
+            push_video_clip_inputs(&mut args, extra_video_paths);
+            if !use_filters {
+                args.push("-map".into());
+                args.push("0:v".into());
+                args.extend(build_video_encoder_args(hw, fast));
+                args.extend(audio_args(audio_copy));
+                args.push(output_path.to_string());
+            } else {
+                let video_filter = build_full_cpu_filter_complex(
+                    clips,
+                    video_clips,
+                    overlay_input_start,
+                    extra_input_start,
+                    video_w,
+                    video_h,
+                );
+                args.push("-filter_complex".into());
+                args.push(video_filter);
+                args.push("-map".into());
+                args.push("[vout]".into());
+                args.extend(audio_args(audio_copy));
+                args.extend(build_video_encoder_args(hw, fast));
+                args.push("-shortest".into());
+                args.push(output_path.to_string());
+            }
+            runs.push(ExportRun {
+                path_kind: ExportPathKind::CpuOverlayHw,
+                stage: "encode_hw",
+                args,
+                duration_sec,
+            });
         }
     }
 
     let mut args = vec!["-y".into(), "-i".into(), video_path.to_string()];
     push_overlay_inputs(&mut args, image_paths);
-    if clips.is_empty() {
+    push_video_clip_inputs(&mut args, extra_video_paths);
+    if !use_filters {
         args.push("-map".into());
         args.push("0:v".into());
         args.extend(build_video_encoder_args(VideoExportEncoderKind::Software, fast));
         args.extend(audio_args(audio_copy));
         args.push(output_path.to_string());
     } else {
+        let video_filter = build_full_cpu_filter_complex(
+            clips,
+            video_clips,
+            overlay_input_start,
+            extra_input_start,
+            video_w,
+            video_h,
+        );
         args.push("-filter_complex".into());
-        args.push(build_cpu_filter_complex(clips, video_w, video_h));
+        args.push(video_filter);
         args.push("-map".into());
         args.push("[vout]".into());
         args.extend(audio_args(audio_copy));
@@ -500,6 +671,7 @@ pub async fn export_video_with_overlays(
     video_id: String,
     output_path: String,
     clips: Vec<VideoOverlayClip>,
+    video_clips: Vec<TimelineVideoClip>,
 ) -> Result<String, String> {
     let emit = |stage: &str, percent: f32, message: Option<String>| {
         let _ = app.emit(
@@ -514,6 +686,9 @@ pub async fn export_video_with_overlays(
     };
 
     controller.begin(&video_id).await;
+
+    let mut video_clips = video_clips;
+    video_clips.sort_by_key(|c| c.track_index);
 
     let export_result = async {
         emit("prepare", 0.0, Some("Preparing export…".to_string()));
@@ -541,6 +716,18 @@ pub async fn export_video_with_overlays(
             image_abs_paths.push(PathBuf::from(abs));
         }
 
+        let mut extra_video_paths: Vec<PathBuf> = Vec::new();
+        for clip in &video_clips {
+            let abs = resolve_timeline_media_absolute(&root_path, &clip.source_relative_path)?;
+            if !abs.is_file() {
+                return Err(format!(
+                    "Timeline video not found: {}",
+                    clip.file_name
+                ));
+            }
+            extra_video_paths.push(abs);
+        }
+
         if let Some(parent) = Path::new(&output_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
@@ -561,7 +748,9 @@ pub async fn export_video_with_overlays(
         let runs = build_export_runs(
             &video_path,
             &image_abs_paths,
+            &extra_video_paths,
             &clips,
+            &video_clips,
             video_w,
             video_h,
             &output_path,

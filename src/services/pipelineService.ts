@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AudioWaveform,
   FinalVideoExportsManifest,
   FinalVideoTimeline,
   ImageGenerationProgress,
@@ -13,6 +14,7 @@ import type {
   TranscriptionPreflight,
   VideoExportPreflight,
   VideoExportProgress,
+  TimelineVideoClip,
   VideoOverlayClip,
 } from "../types/pipeline";
 
@@ -251,6 +253,13 @@ export async function saveFinalVideoTimeline(
   await invoke("save_final_video_timeline_cmd", { rootPath, timeline });
 }
 
+export async function ensureAudioWaveform(
+  rootPath: string,
+  videoId: string,
+): Promise<AudioWaveform> {
+  return invoke<AudioWaveform>("ensure_audio_waveform", { rootPath, videoId });
+}
+
 export async function getFinalVideoExports(
   rootPath: string,
   videoId: string,
@@ -315,11 +324,24 @@ export async function cancelVideoExport(videoId: string): Promise<boolean> {
   return invoke<boolean>("cancel_video_export", { videoId });
 }
 
+export async function importTimelineVideo(
+  rootPath: string,
+  videoId: string,
+  sourcePath: string,
+): Promise<TimelineVideoClip> {
+  return invoke<TimelineVideoClip>("import_timeline_video_cmd", {
+    rootPath,
+    videoId,
+    sourcePath,
+  });
+}
+
 export async function exportFinalVideo(
   rootPath: string,
   videoId: string,
   outputPath: string,
   clips: VideoOverlayClip[],
+  videoClips: TimelineVideoClip[] = [],
   onProgress?: (progress: VideoExportProgress) => void,
 ): Promise<string> {
   let unlisten: UnlistenFn | undefined;
@@ -334,6 +356,7 @@ export async function exportFinalVideo(
       videoId,
       outputPath,
       clips,
+      videoClips,
     });
   } finally {
     if (unlisten) {

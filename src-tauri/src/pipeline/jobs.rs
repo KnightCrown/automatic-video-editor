@@ -1,12 +1,13 @@
 use tauri::{AppHandle, Emitter};
 
-use crate::asr::parakeet::{cleanup_wav, transcribe_wav, wav_cache_path};
+use crate::asr::parakeet::transcribe_wav;
 use crate::asr::{download_parakeet_model, parakeet_model_ready};
 use crate::audio::ffmpeg::extract_audio_for_transcription;
+use crate::audio::waveform::generate_and_save_waveform_from_transcription_wav;
 use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
     ensure_project_dirs, has_transcript_for_video, load_project, project_paths, save_project,
-    save_transcript, sync_videos_in_manifest,
+    save_transcript, sync_videos_in_manifest, transcription_audio_path,
 };
 use crate::types::{PipelineProgress, ProjectManifest, VideoJob};
 
@@ -139,7 +140,9 @@ pub async fn process_single_video(
         return Ok(());
     }
 
-    let wav_path = wav_cache_path(&app, &job_id)?;
+    let wav_path = transcription_audio_path(&paths, &video.id)?
+        .to_string_lossy()
+        .into_owned();
 
     let _ = app.emit(
         "pipeline_progress",
@@ -189,7 +192,12 @@ pub async fn process_single_video(
     save_transcript(&paths, &transcript)
         .map_err(|e| format!("[Save transcript] {e}"))?;
 
-    cleanup_wav(&wav_path);
+    let _ = generate_and_save_waveform_from_transcription_wav(
+        project_root,
+        &video.id,
+        &video.path,
+        &wav_path,
+    );
 
     let _ = app.emit(
         "pipeline_progress",

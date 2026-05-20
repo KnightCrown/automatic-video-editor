@@ -11,14 +11,17 @@ import {
   useVideoExportSession,
 } from "../context/VideoExportContext";
 import {
+  ensureAudioWaveform,
   getFinalVideoExports,
   getFinalVideoTimeline,
   getTranscriptionPreflight,
   saveFinalVideoTimeline,
 } from "../services/pipelineService";
 import type {
+  AudioWaveform,
   FinalVideoExport,
   FinalVideoTimeline,
+  TimelineVideoClip,
   VideoJob,
   VideoOverlayClip,
 } from "../types/pipeline";
@@ -38,6 +41,8 @@ export function VideosPage() {
   const [loading, setLoading] = useState(false);
   const [ffmpegOk, setFfmpegOk] = useState<boolean | null>(null);
   const [editingVideo, setEditingVideo] = useState<VideoJob | null>(null);
+  const [openingEditorForVideoId, setOpeningEditorForVideoId] = useState<string | null>(null);
+  const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform>>({});
   const [playingExportId, setPlayingExportId] = useState<string | null>(null);
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(() => new Set());
   const [batchExport, setBatchExport] = useState<{
@@ -57,6 +62,7 @@ export function VideosPage() {
   }, [project?.videos, activeVideoPath]);
 
   const clips = useMemo(() => timeline?.clips ?? [], [timeline?.clips]);
+  const videoClips = useMemo(() => timeline?.videoClips ?? [], [timeline?.videoClips]);
 
   useEffect(() => {
     if (!project?.videos.length) {
@@ -195,6 +201,7 @@ export function VideosPage() {
           fileName: video.fileName,
           rootPath: project.rootPath,
           clips: t.clips,
+          videoClips: t.videoClips ?? [],
         });
         if (!ran) break;
       }
@@ -213,6 +220,25 @@ export function VideosPage() {
     loadEpisodeSummaries,
     loadActiveEpisode,
   ]);
+
+  const openTimelineEditor = useCallback(
+    async (video: VideoJob) => {
+      if (!project) return;
+      setOpeningEditorForVideoId(video.id);
+      setBatchError(null);
+      try {
+        const waveform = await ensureAudioWaveform(project.rootPath, video.id);
+        setAudioWaveforms((prev) => ({ ...prev, [video.id]: waveform }));
+        setEditingVideo(video);
+      } catch (err) {
+        setBatchError(`Could not generate audio peak waveform: ${String(err)}`);
+        setEditingVideo(video);
+      } finally {
+        setOpeningEditorForVideoId(null);
+      }
+    },
+    [project],
+  );
 
   if (!project) {
     return (
@@ -256,6 +282,12 @@ export function VideosPage() {
         </div>
       )}
 
+      {openingEditorForVideoId && (
+        <div className="mb-4 p-3 rounded-lg bg-primary bg-opacity-15 text-white text-sm border border-primary border-opacity-30">
+          Generating audio peak waveform before opening the timeline...
+        </div>
+      )}
+
       {batchExport && (
         <div className="mb-4 p-4 rounded-xl bg-surface border border-border flex-shrink-0">
           <p className="text-sm text-white font-medium">
@@ -294,13 +326,15 @@ export function VideosPage() {
               video={activeVideo}
               rootPath={project.rootPath}
               clips={clips}
+              videoClips={videoClips}
               exports={exports}
               ffmpegOk={ffmpegOk}
               playingExportId={playingExportId}
               onPlayExport={setPlayingExportId}
-              onEditTimeline={() => setEditingVideo(activeVideo)}
+              onEditTimeline={() => void openTimelineEditor(activeVideo)}
               exportSession={exportSession}
               batchExportActive={batchExport !== null}
+              openingEditor={openingEditorForVideoId === activeVideo.id}
             />
           )}
         </div>
@@ -311,10 +345,13 @@ export function VideosPage() {
           video={editingVideo}
           rootPath={project.rootPath}
           initialClips={clips}
-          onSave={async (nextClips) => {
+          initialVideoClips={videoClips}
+          audioWaveform={audioWaveforms[editingVideo.id] ?? null}
+          onSave={async ({ clips: nextClips, videoClips: nextVideoClips }) => {
             const nextTimeline: FinalVideoTimeline = {
               videoId: editingVideo.id,
               clips: nextClips,
+              videoClips: nextVideoClips,
               updatedAt: new Date().toISOString(),
             };
             await saveFinalVideoTimeline(project.rootPath, nextTimeline);
@@ -422,6 +459,7 @@ function EpisodeVideosPanel({
   video,
   rootPath,
   clips,
+  videoClips,
   exports,
   ffmpegOk,
   playingExportId,
@@ -429,10 +467,12 @@ function EpisodeVideosPanel({
   onEditTimeline,
   exportSession,
   batchExportActive,
+  openingEditor,
 }: {
   video: VideoJob;
   rootPath: string;
   clips: VideoOverlayClip[];
+  videoClips: TimelineVideoClip[];
   exports: FinalVideoExport[];
   ffmpegOk: boolean | null;
   playingExportId: string | null;
@@ -440,6 +480,7 @@ function EpisodeVideosPanel({
   onEditTimeline: () => void;
   exportSession: ReturnType<typeof useVideoExportSession>;
   batchExportActive: boolean;
+  openingEditor: boolean;
 }) {
   const { startExport, cancelExport } = useVideoExport();
   const exporting = exportSession.status === "exporting";
@@ -451,8 +492,9 @@ function EpisodeVideosPanel({
       fileName: video.fileName,
       rootPath,
       clips,
+      videoClips,
     });
-  }, [clips, rootPath, startExport, video.fileName, video.id]);
+  }, [clips, rootPath, startExport, video.fileName, video.id, videoClips]);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto p-5 flex flex-col gap-6">
@@ -514,10 +556,10 @@ function EpisodeVideosPanel({
               <button
                 type="button"
                 onClick={onEditTimeline}
-                disabled={exporting || batchExportActive}
+                disabled={exporting || batchExportActive || openingEditor}
                 className="px-3 py-1.5 rounded-lg text-sm border border-border text-textMuted hover:text-white hover:bg-white hover:bg-opacity-5 disabled:opacity-50"
               >
-                Edit timeline
+                {openingEditor ? "Generating waveform..." : "Edit timeline"}
               </button>
               <button
                 type="button"

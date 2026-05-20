@@ -288,12 +288,48 @@ pub struct VideoOverlayClip {
     pub exit: Option<String>,
 }
 
+/// Extra video placed on a timeline track above the base episode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineVideoClip {
+    pub id: String,
+    pub source_relative_path: String,
+    pub file_name: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub source_duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_pct: Option<f64>,
+    pub track_index: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalVideoTimeline {
     pub video_id: String,
     pub clips: Vec<VideoOverlayClip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_clips: Vec<TimelineVideoClip>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioWaveform {
+    pub video_id: String,
+    pub generated_at: String,
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified_ms: Option<u64>,
+    pub duration_ms: u64,
+    pub bucket_duration_ms: f64,
+    pub peaks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

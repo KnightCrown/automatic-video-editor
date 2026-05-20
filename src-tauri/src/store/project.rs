@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    FinalVideoTimeline, OverlayCandidate, OverlayCandidateStatus, ProjectManifest,
-    FinalVideoExport, FinalVideoExportsManifest,
-    ProjectSettings, Transcript, TranscriptAnalysis, VideoJob, OverlayImagesManifest,
-    DEFAULT_GROK_IMAGINE_MODEL, LEGACY_GROK_IMAGINE_MODEL_QUALITY,
+    AudioWaveform, FinalVideoExport, FinalVideoExportsManifest, FinalVideoTimeline,
+    OverlayCandidate, OverlayCandidateStatus, OverlayImagesManifest, ProjectManifest,
+    ProjectSettings, Transcript, TranscriptAnalysis, VideoJob, DEFAULT_GROK_IMAGINE_MODEL,
+    LEGACY_GROK_IMAGINE_MODEL_QUALITY,
 };
 
 pub const DEVOTIONTIME_DIR: &str = ".devotiontime";
@@ -53,6 +53,7 @@ pub fn ensure_project_dirs(paths: &ProjectPaths) -> Result<(), String> {
         &paths.suggestions,
         &paths.outputs,
         &paths.cache,
+        &base.join("audio"),
     ] {
         fs::create_dir_all(dir).map_err(|e| format!("create_dir_failed:{}:{}", dir.display(), e))?;
     }
@@ -129,6 +130,48 @@ pub fn final_video_timeline_path(paths: &ProjectPaths, video_id: &str) -> Result
     Ok(devotiontime_base(paths)?
         .join("final-video")
         .join(format!("{video_id}.timeline.json")))
+}
+
+pub fn transcription_audio_path(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+    Ok(devotiontime_base(paths)?
+        .join("audio")
+        .join(format!("{video_id}.wav")))
+}
+
+pub fn audio_waveform_path(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+    Ok(devotiontime_base(paths)?
+        .join("final-video")
+        .join(format!("{video_id}.waveform.json")))
+}
+
+pub fn timeline_media_dir(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+    Ok(devotiontime_base(paths)?
+        .join("timeline-media")
+        .join(video_id))
+}
+
+pub fn save_audio_waveform(paths: &ProjectPaths, waveform: &AudioWaveform) -> Result<(), String> {
+    let path = audio_waveform_path(paths, &waveform.video_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_waveform_dir:{e}"))?;
+    }
+    let raw =
+        serde_json::to_string(waveform).map_err(|e| format!("serialize_audio_waveform:{e}"))?;
+    fs::write(&path, raw).map_err(|e| format!("write_audio_waveform:{e}"))
+}
+
+pub fn load_audio_waveform(
+    paths: &ProjectPaths,
+    video_id: &str,
+) -> Result<Option<AudioWaveform>, String> {
+    let path = audio_waveform_path(paths, video_id)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read_audio_waveform:{e}"))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("parse_audio_waveform:{e}"))
 }
 
 pub fn save_final_video_timeline(

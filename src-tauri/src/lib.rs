@@ -13,30 +13,33 @@ use crate::asr::{
     missing_parakeet_files, parakeet_model_ready, ParakeetModelFile,
 };
 use crate::audio::ffmpeg::check_ffmpeg;
+use crate::audio::waveform::ensure_audio_waveform_for_video;
+use crate::image::overlay_images;
 use crate::llm::openai::{
     analyze_transcript_for_overlays, api_key_storage_hint, clear_openai_api_key,
     has_openai_api_key, save_openai_api_key,
 };
-use crate::image::overlay_images;
 use crate::pipeline::jobs::ensure_model_and_run;
 use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
     append_final_video_export, load_final_video_exports, load_overlay_images_manifest_for_video,
     load_project, load_transcript, load_transcript_analysis_for_video, load_transcript_for_video,
-    project_paths, save_final_video_timeline, refresh_video_statuses_in_manifest, save_project,
+    project_paths, refresh_video_statuses_in_manifest, save_final_video_timeline, save_project,
     save_transcript_analysis, set_video_pipeline_status, sync_videos_in_manifest,
 };
-use crate::video::composite::export_video_with_overlays;
-use crate::video::export_session::VideoExportController;
-use crate::video::timeline::{build_default_timeline, resolve_final_video_timeline};
 use crate::store::secrets::{
     clear_xai_api_key, has_xai_api_key, save_xai_api_key, xai_api_key_storage_hint,
 };
 use crate::types::{
-    FinalVideoTimeline, OverlayImagesManifest, ProjectManifest, ProjectSettings, Transcript,
-    TranscriptAnalysis, FinalVideoExport, FinalVideoExportsManifest, TranscriptionPreflight, VideoExportPreflight,
+    AudioWaveform, FinalVideoExport, FinalVideoExportsManifest, FinalVideoTimeline,
+    OverlayImagesManifest, ProjectManifest, ProjectSettings, TimelineVideoClip, Transcript,
+    TranscriptAnalysis, TranscriptionPreflight, VideoExportPreflight,
 };
+use crate::video::composite::export_video_with_overlays;
 use crate::video::encoders::refresh_video_export_preflight_cache;
+use crate::video::export_session::VideoExportController;
+use crate::video::timeline::{build_default_timeline, resolve_final_video_timeline};
+use crate::video::timeline_media::import_timeline_video;
 use tauri::Manager;
 
 /// Preferred minimum window size (logical px); clamped to the current monitor in setup.
@@ -398,6 +401,16 @@ fn save_final_video_timeline_cmd(
 }
 
 #[tauri::command]
+async fn ensure_audio_waveform(
+    root_path: String,
+    video_id: String,
+) -> Result<AudioWaveform, String> {
+    tokio::task::spawn_blocking(move || ensure_audio_waveform_for_video(&root_path, &video_id))
+        .await
+        .map_err(|e| format!("audio_waveform_task_failed:{e}"))?
+}
+
+#[tauri::command]
 fn get_final_video_exports(
     root_path: String,
     video_id: String,
@@ -440,6 +453,15 @@ async fn cancel_video_export(
 }
 
 #[tauri::command]
+fn import_timeline_video_cmd(
+    root_path: String,
+    video_id: String,
+    source_path: String,
+) -> Result<TimelineVideoClip, String> {
+    import_timeline_video(&root_path, &video_id, &source_path)
+}
+
+#[tauri::command]
 async fn export_video_with_overlays_cmd(
     app: tauri::AppHandle,
     controller: tauri::State<'_, VideoExportController>,
@@ -447,6 +469,7 @@ async fn export_video_with_overlays_cmd(
     video_id: String,
     output_path: String,
     clips: Vec<crate::types::VideoOverlayClip>,
+    video_clips: Vec<TimelineVideoClip>,
 ) -> Result<String, String> {
     let manifest = load_project(&root_path)?;
     let video = manifest
@@ -463,6 +486,7 @@ async fn export_video_with_overlays_cmd(
         video_id,
         output_path,
         clips,
+        video_clips,
     )
     .await
 }
@@ -512,8 +536,10 @@ pub fn run() {
             get_final_video_timeline,
             rebuild_final_video_timeline,
             save_final_video_timeline_cmd,
+            ensure_audio_waveform,
             get_final_video_exports,
             record_final_video_export,
+            import_timeline_video_cmd,
             export_video_with_overlays_cmd,
             cancel_video_export,
         ])
