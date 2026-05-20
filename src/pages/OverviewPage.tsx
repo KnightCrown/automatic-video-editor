@@ -17,8 +17,12 @@ import {
   getTranscriptionPreflight,
   openProject,
   getProject,
+  isApiKeySet,
+  isXaiApiKeySet,
+  getTranscriptAnalysis,
+  getOverlayImagesManifest,
+  regenerateOverlayImage,
 } from "../services/pipelineService";
-import { isParakeetModelReady } from "../services/parakeetModelService";
 import type { VideoJob } from "../types/pipeline";
 import {
   transcriptionHeadline,
@@ -31,6 +35,7 @@ import {
 import { displayPipelineStatus, projectDisplayName } from "../utils/format";
 
 type StatusFilter = "All" | "Ready" | "Processing" | "Completed" | "Failed";
+type BatchAction = "all" | "transcribe" | "analyze" | "images";
 
 function matchesFilter(video: VideoJob, filter: StatusFilter): boolean {
   switch (filter) {
@@ -145,13 +150,17 @@ export function OverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("All");
   const [search, setSearch] = useState("");
+  const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(() => new Set());
+  const [batchAction, setBatchAction] = useState<BatchAction>("all");
+  const [processing, setProcessing] = useState(false);
   const {
     transcription,
-    isTranscriptionRunning,
-    startBatchTranscription,
+    isBusy,
     startSingleTranscription,
+    startAnalyze,
+    startImageGeneration,
   } = usePipelineActivity();
-  const running = isTranscriptionRunning;
+  const running = isBusy || processing;
   const progress = transcription?.progress ?? null;
   const [expandedErrorId, setExpandedErrorId] = useState<string | null>(null);
   const [canTranscribe, setCanTranscribe] = useState(true);
@@ -227,24 +236,103 @@ export function OverviewPage() {
     });
   }, [project, filter, search]);
 
-  const readyCount = useMemo(
-    () => project?.videos.filter((v) => v.status === "pending").length ?? 0,
-    [project?.videos],
-  );
+  const selectedCount = selectedVideoIds.size;
 
-  async function handleRunAllReady() {
-    if (!project) return;
+  const allFilteredSelected =
+    filteredVideos.length > 0 &&
+    filteredVideos.every((video) => selectedVideoIds.has(video.id));
+
+  function toggleVideoSelected(videoId: string) {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(videoId)) next.delete(videoId);
+      else next.add(videoId);
+      return next;
+    });
+  }
+
+  function toggleSelectAllFiltered() {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        for (const video of filteredVideos) next.delete(video.id);
+      } else {
+        for (const video of filteredVideos) next.add(video.id);
+      }
+      return next;
+    });
+  }
+
+  async function processImagesForVideo(rootPath: string, video: VideoJob) {
+    const analysis = await getTranscriptAnalysis(rootPath, video.id);
+    if (!analysis?.suggestions.length) {
+      throw new Error(`${video.fileName}: no overlay analysis found — run analyze first.`);
+    }
+
+    const allIds = analysis.suggestions.map((s) => s.id);
+    const manifest = await getOverlayImagesManifest(rootPath, video.id);
+    const generatedIds = new Set(manifest?.images.map((i) => i.suggestionId) ?? []);
+    const toGenerate = allIds.filter((id) => !generatedIds.has(id));
+
+    if (toGenerate.length > 0) {
+      await startImageGeneration(rootPath, video.id, toGenerate, video.fileName);
+      return;
+    }
+
+    for (const id of allIds) {
+      await regenerateOverlayImage(rootPath, video.id, id);
+    }
+    await refreshProject();
+  }
+
+  async function handleProcessSelected() {
+    if (!project || selectedCount === 0) return;
     setError(null);
+    setProcessing(true);
+
+    const targets = project.videos.filter((video) => selectedVideoIds.has(video.id));
+
     try {
       await loadPreflight();
-      const ready = await isParakeetModelReady();
-      const manifest = await startBatchTranscription(project.rootPath, !ready);
-      const failed = manifest.videos.find((v) => v.status === "failed" && v.error);
-      if (failed?.error) setExpandedErrorId(failed.id);
-    } catch (err) {
-      setError(String(err));
+
+      if (batchAction === "transcribe" || batchAction === "all") {
+        if (!canTranscribe) {
+          setError("Transcription setup incomplete — check FFmpeg and Parakeet model in Settings.");
+          return;
+        }
+      }
+      if (batchAction === "analyze" || batchAction === "all") {
+        if (!(await isApiKeySet())) {
+          setError("OpenAI API key is not set. Save your key in Settings first.");
+          return;
+        }
+      }
+      if (batchAction === "images" || batchAction === "all") {
+        if (!(await isXaiApiKeySet())) {
+          setError("xAI API key is not set. Save your key in Settings first.");
+          return;
+        }
+      }
+
+      for (const video of targets) {
+        try {
+          if (batchAction === "transcribe" || batchAction === "all") {
+            await startSingleTranscription(project.rootPath, video.id, video.fileName);
+          }
+          if (batchAction === "analyze" || batchAction === "all") {
+            await startAnalyze(project.rootPath, video.id, video.fileName);
+          }
+          if (batchAction === "images" || batchAction === "all") {
+            await processImagesForVideo(project.rootPath, video);
+          }
+        } catch (err) {
+          setError(`${video.fileName}: ${String(err)}`);
+        }
+      }
     } finally {
+      setProcessing(false);
       await loadPreflight();
+      await refreshProject();
     }
   }
 
@@ -411,6 +499,15 @@ export function OverviewPage() {
                 <table className="w-full text-left border-collapse">
                   <thead className="bg-[#151821] text-textMuted text-xs font-medium sticky top-0 z-20">
                     <tr>
+                      <th className="p-4 w-10" aria-label="Select">
+                        <input
+                          type="checkbox"
+                          checked={allFilteredSelected}
+                          onChange={toggleSelectAllFiltered}
+                          className="rounded border-border accent-primary"
+                          aria-label="Select all shown videos"
+                        />
+                      </th>
                       <th className="p-4 font-medium">Video</th>
                       <th className="p-4 font-medium">Status</th>
                       <th className="p-4 font-medium w-48">Pipeline Progress</th>
@@ -431,6 +528,15 @@ export function OverviewPage() {
                           className="hover:bg-white hover:bg-opacity-5 group transition-colors cursor-pointer"
                           onClick={() => openInEditing(video.id)}
                         >
+                          <td className="p-4 w-10" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selectedVideoIds.has(video.id)}
+                              onChange={() => toggleVideoSelected(video.id)}
+                              className="rounded border-border accent-primary"
+                              aria-label={`Select ${video.fileName}`}
+                            />
+                          </td>
                           <td className="p-4">
                             <p
                               className="font-medium text-sm text-white truncate max-w-[280px]"
@@ -502,7 +608,7 @@ export function OverviewPage() {
                     })}
                     {filteredVideos.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="p-8 text-center text-textMuted text-sm">
+                        <td colSpan={5} className="p-8 text-center text-textMuted text-sm">
                           No videos match this filter.
                         </td>
                       </tr>
@@ -512,8 +618,7 @@ export function OverviewPage() {
               </div>
 
               <div className="p-4 border-t border-border flex justify-between items-center bg-[#151821]">
-                <span className="text-xs text-textMuted">{filteredVideos.length} shown</span>
-                <div className="flex gap-3">
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
                     disabled={running || refreshing}
@@ -523,20 +628,36 @@ export function OverviewPage() {
                     <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{" "}
                     {refreshing ? "Refreshing…" : "Refresh"}
                   </button>
+                  <span className="text-xs text-textMuted">
+                    {selectedCount > 0 ? `${selectedCount} selected · ` : ""}
+                    {filteredVideos.length} shown
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <select
+                    value={batchAction}
+                    onChange={(e) => setBatchAction(e.target.value as BatchAction)}
+                    disabled={running}
+                    className="bg-background border border-border rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary disabled:opacity-50"
+                  >
+                    <option value="all">All</option>
+                    <option value="transcribe">Transcribe</option>
+                    <option value="analyze">Analyze</option>
+                    <option value="images">Images</option>
+                  </select>
                   <button
                     type="button"
-                    disabled={running || readyCount === 0 || !canTranscribe}
+                    disabled={running || selectedCount === 0}
                     title={
-                      !canTranscribe
-                        ? "Complete setup in Settings first"
-                        : readyCount === 0
-                          ? "No pending videos"
-                          : "Run transcription pipeline"
+                      selectedCount === 0
+                        ? "Select videos to process"
+                        : `Run ${batchAction} on selected videos`
                     }
-                    onClick={() => void handleRunAllReady()}
+                    onClick={() => void handleProcessSelected()}
                     className="bg-primary hover:bg-primaryHover text-white px-4 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
                   >
-                    <Play size={14} /> Start all ready ({readyCount})
+                    <Play size={14} />{" "}
+                    {processing ? "Processing…" : `Process (${selectedCount})`}
                   </button>
                 </div>
               </div>
@@ -625,8 +746,9 @@ function OverviewTipsCard({ navigate }: { navigate: ReturnType<typeof useNavigat
         <div className="w-1 h-4 bg-[#EAB308] rounded-full" /> Tips
       </h3>
       <p className="text-xs text-textMuted mb-2">
-        Run <strong>Start all ready</strong> to transcribe pending videos, then open{" "}
-        <strong>Editing</strong> to analyze overlays and generate images.
+        Select episodes, choose a pipeline step from the dropdown, then click{" "}
+        <strong>Process</strong> to run transcribe, analyze, and/or image generation. Open{" "}
+        <strong>Editing</strong> to review overlays and fine-tune results.
       </p>
       <button
         type="button"

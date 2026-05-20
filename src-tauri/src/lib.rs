@@ -21,11 +21,10 @@ use crate::image::overlay_images;
 use crate::pipeline::jobs::ensure_model_and_run;
 use crate::pipeline::scan::scan_video_folder;
 use crate::store::project::{
-    load_overlay_images_manifest_for_video, load_project, load_transcript,
-    load_transcript_analysis_for_video, load_transcript_for_video, project_paths,
-    save_final_video_timeline,
-    refresh_video_statuses_in_manifest, save_project, save_transcript_analysis,
-    set_video_pipeline_status, sync_videos_in_manifest,
+    append_final_video_export, load_final_video_exports, load_overlay_images_manifest_for_video,
+    load_project, load_transcript, load_transcript_analysis_for_video, load_transcript_for_video,
+    project_paths, save_final_video_timeline, refresh_video_statuses_in_manifest, save_project,
+    save_transcript_analysis, set_video_pipeline_status, sync_videos_in_manifest,
 };
 use crate::video::composite::export_video_with_overlays;
 use crate::video::export_session::VideoExportController;
@@ -35,7 +34,7 @@ use crate::store::secrets::{
 };
 use crate::types::{
     FinalVideoTimeline, OverlayImagesManifest, ProjectManifest, ProjectSettings, Transcript,
-    TranscriptAnalysis, TranscriptionPreflight, VideoExportPreflight,
+    TranscriptAnalysis, FinalVideoExport, FinalVideoExportsManifest, TranscriptionPreflight, VideoExportPreflight,
 };
 use crate::video::encoders::refresh_video_export_preflight_cache;
 use tauri::Manager;
@@ -177,6 +176,7 @@ async fn regenerate_overlay_image(
     root_path: String,
     video_id: String,
     suggestion_id: String,
+    image_prompt: Option<String>,
 ) -> Result<OverlayImagesManifest, String> {
     let manifest = load_project(&root_path)?;
     overlay_images::regenerate_overlay_image_for_video(
@@ -184,6 +184,7 @@ async fn regenerate_overlay_image(
         root_path,
         video_id,
         suggestion_id,
+        image_prompt,
         &manifest.settings,
     )
     .await
@@ -397,6 +398,35 @@ fn save_final_video_timeline_cmd(
 }
 
 #[tauri::command]
+fn get_final_video_exports(
+    root_path: String,
+    video_id: String,
+) -> Result<FinalVideoExportsManifest, String> {
+    let paths = project_paths(&root_path)?;
+    load_final_video_exports(&paths, &video_id)
+}
+
+#[tauri::command]
+fn record_final_video_export(
+    root_path: String,
+    video_id: String,
+    output_path: String,
+    file_name: String,
+    clip_count: u32,
+) -> Result<FinalVideoExportsManifest, String> {
+    let paths = project_paths(&root_path)?;
+    let exported_at = chrono::Utc::now().to_rfc3339();
+    let export = FinalVideoExport {
+        id: uuid::Uuid::new_v4().to_string(),
+        output_path,
+        file_name,
+        exported_at,
+        clip_count,
+    };
+    append_final_video_export(&paths, &video_id, export)
+}
+
+#[tauri::command]
 fn get_video_export_preflight() -> VideoExportPreflight {
     refresh_video_export_preflight_cache()
 }
@@ -482,6 +512,8 @@ pub fn run() {
             get_final_video_timeline,
             rebuild_final_video_timeline,
             save_final_video_timeline_cmd,
+            get_final_video_exports,
+            record_final_video_export,
             export_video_with_overlays_cmd,
             cancel_video_export,
         ])

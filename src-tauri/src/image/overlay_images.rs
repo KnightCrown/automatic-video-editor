@@ -290,6 +290,7 @@ pub async fn regenerate_overlay_image_for_video(
     root_path: String,
     video_id: String,
     suggestion_id: String,
+    custom_image_prompt: Option<String>,
     settings: &ProjectSettings,
 ) -> Result<OverlayImagesManifest, String> {
     let api_key = get_xai_api_key().map_err(|e| {
@@ -316,6 +317,11 @@ pub async fn regenerate_overlay_image_for_video(
         .into_iter()
         .find(|s| s.id == suggestion_id)
         .ok_or_else(|| format!("suggestion_not_found:{suggestion_id}"))?;
+
+    let prompt = custom_image_prompt
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| suggestion.image_prompt.clone());
 
     let model = settings.grok_imagine_model.trim();
     let model = if model.is_empty() {
@@ -361,7 +367,7 @@ pub async fn regenerate_overlay_image_for_video(
                 .unwrap_or(&format!("{suggestion_id}.png")),
         );
 
-    let bytes = generate_imagine_png(&api_key, model, &suggestion.image_prompt).await?;
+    let bytes = generate_imagine_png(&api_key, model, &prompt).await?;
     fs::write(&abs, bytes).map_err(|e| format!("write_png:{e}"))?;
 
     let generated_at = Utc::now().to_rfc3339();
@@ -372,7 +378,7 @@ pub async fn regenerate_overlay_image_for_video(
     entry.relative_path = rel;
     entry.generated_at = generated_at;
     entry.title = suggestion.title.clone();
-    entry.image_prompt = suggestion.image_prompt.clone();
+    entry.image_prompt = prompt;
     entry.transcript_excerpt = suggestion.transcript_excerpt.clone();
     manifest.model = model.to_string();
     manifest.generated_at = Utc::now().to_rfc3339();

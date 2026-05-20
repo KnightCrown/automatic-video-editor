@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  FinalVideoExportsManifest,
   FinalVideoTimeline,
   ImageGenerationProgress,
   OverlayImagesManifest,
@@ -176,9 +177,13 @@ export async function regenerateOverlayImage(
   rootPath: string,
   videoId: string,
   suggestionId: string,
-  onProgress?: (progress: ImageGenerationProgress) => void,
+  options?: {
+    imagePrompt?: string;
+    onProgress?: (progress: ImageGenerationProgress) => void;
+  },
 ): Promise<OverlayImagesManifest> {
   let unlisten: UnlistenFn | undefined;
+  const onProgress = options?.onProgress;
   if (onProgress) {
     unlisten = await listen<ImageGenerationProgress>(
       "image_generation_progress",
@@ -192,6 +197,7 @@ export async function regenerateOverlayImage(
       rootPath,
       videoId,
       suggestionId,
+      imagePrompt: options?.imagePrompt,
     });
   } finally {
     if (unlisten) {
@@ -243,6 +249,32 @@ export async function saveFinalVideoTimeline(
   timeline: FinalVideoTimeline,
 ): Promise<void> {
   await invoke("save_final_video_timeline_cmd", { rootPath, timeline });
+}
+
+export async function getFinalVideoExports(
+  rootPath: string,
+  videoId: string,
+): Promise<FinalVideoExportsManifest> {
+  return invoke<FinalVideoExportsManifest>("get_final_video_exports", {
+    rootPath,
+    videoId,
+  });
+}
+
+export async function recordFinalVideoExport(
+  rootPath: string,
+  videoId: string,
+  outputPath: string,
+  fileName: string,
+  clipCount: number,
+): Promise<FinalVideoExportsManifest> {
+  return invoke<FinalVideoExportsManifest>("record_final_video_export", {
+    rootPath,
+    videoId,
+    outputPath,
+    fileName,
+    clipCount,
+  });
 }
 
 /** Rebuild timeline from current analysis + image manifest and persist it. */

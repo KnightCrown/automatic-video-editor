@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   cancelVideoExport,
   exportFinalVideo,
+  recordFinalVideoExport,
 } from "../services/pipelineService";
 import type { VideoExportProgress, VideoOverlayClip } from "../types/pipeline";
 import { pickVideoSavePath, sanitizeDownloadFilename } from "../utils/download";
@@ -37,7 +38,7 @@ type VideoExportContextValue = {
     fileName: string;
     rootPath: string;
     clips: VideoOverlayClip[];
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   cancelExport: (videoId: string) => Promise<void>;
   clearSession: (videoId: string) => void;
 };
@@ -162,13 +163,13 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
       clips: VideoOverlayClip[];
     }) => {
       const cur = sessionsRef.current[videoId];
-      if (cur?.status === "exporting") return;
+      if (cur?.status === "exporting") return false;
 
       const defaultName = sanitizeDownloadFilename(
         `${fileName.replace(/\.[^.]+$/, "")}-final.mp4`,
       );
       const outPath = await pickVideoSavePath(defaultName);
-      if (!outPath) return;
+      if (!outPath) return false;
 
       const startedAt = Date.now();
       patchSession(videoId, {
@@ -190,6 +191,17 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
       try {
         const path = await exportFinalVideo(rootPath, videoId, outPath, clips);
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        try {
+          await recordFinalVideoExport(
+            rootPath,
+            videoId,
+            path,
+            defaultName,
+            clips.length,
+          );
+        } catch {
+          /* export succeeded; registry is best-effort */
+        }
         patchSession(videoId, {
           status: "success",
           startedAt: null,
@@ -204,6 +216,7 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
           },
           cancelling: false,
         });
+        return true;
       } catch (err) {
         if (isExportCancelledError(err)) {
           patchSession(videoId, {
@@ -226,6 +239,7 @@ export function VideoExportProvider({ children }: { children: ReactNode }) {
             cancelling: false,
           });
         }
+        return true;
       }
     },
     [patchSession],

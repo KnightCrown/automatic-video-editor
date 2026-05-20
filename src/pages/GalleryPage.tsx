@@ -400,30 +400,28 @@ function GalleryGrid({
                 viewMode === "list" ? "w-32 h-20 flex-shrink-0 rounded-lg" : "aspect-square w-full"
               }`}
             >
-              <label
-                className="absolute top-2 left-2 z-10"
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => e.stopPropagation()}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleChecked(key);
+                }}
+                className={`absolute top-2 left-2 z-10 w-[22px] h-[22px] rounded flex items-center justify-center transition-colors ${
+                  isChecked
+                    ? "bg-primary text-white"
+                    : "bg-black/50 border border-white/40 hover:border-white/70"
+                }`}
+                aria-label={`Select ${item.img.title} for download`}
+                aria-pressed={isChecked}
               >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => onToggleChecked(key)}
-                  className="w-4 h-4 rounded border-border bg-background accent-primary cursor-pointer"
-                  aria-label={`Select ${item.img.title} for download`}
-                />
-              </label>
+                <Check size={14} className={isChecked ? "opacity-100" : "opacity-0"} />
+              </button>
               {url ? (
                 <img src={url} alt={item.img.title} className="w-full h-full object-cover" />
               ) : previewErrors[key] ? (
                 <span className="text-xs text-danger p-2">{previewErrors[key]}</span>
               ) : (
                 <span className="text-textMuted text-xs">Loading…</span>
-              )}
-              {isSelected && (
-                <div className="absolute top-2 right-2 bg-primary text-white p-1 rounded pointer-events-none">
-                  <Check size={14} />
-                </div>
               )}
             </button>
             <div className={viewMode === "list" ? "flex-1 min-w-0 py-1" : "p-3"}>

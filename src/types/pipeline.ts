@@ -212,6 +212,19 @@ export interface FinalVideoTimeline {
   updatedAt: string;
 }
 
+export interface FinalVideoExport {
+  id: string;
+  outputPath: string;
+  fileName: string;
+  exportedAt: string;
+  clipCount: number;
+}
+
+export interface FinalVideoExportsManifest {
+  videoId: string;
+  exports: FinalVideoExport[];
+}
+
 export interface VideoExportProgress {
   videoId: string;
   stage: string;

@@ -6,7 +6,7 @@ import { PipelineActivityBanner } from "./components/layout/PipelineActivityBann
 import { OverviewPage } from "./pages/OverviewPage";
 import { EditingPage } from "./pages/EditingPage";
 import { GalleryPage } from "./pages/GalleryPage";
-import { FinalVideoPage } from "./pages/FinalVideoPage";
+import { VideosPage } from "./pages/VideosPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { Sidebar } from "./components/layout/Sidebar";
 import "./App.css";
@@ -25,7 +25,8 @@ function App() {
                   <Routes>
                     <Route path="/" element={<OverviewPage />} />
                     <Route path="/editing" element={<EditingPage />} />
-                    <Route path="/final-video" element={<FinalVideoPage />} />
+                    <Route path="/videos" element={<VideosPage />} />
+                    <Route path="/final-video" element={<VideosPage />} />
                     <Route path="/gallery" element={<GalleryPage />} />
                     <Route path="/settings" element={<SettingsPage />} />
                   </Routes>

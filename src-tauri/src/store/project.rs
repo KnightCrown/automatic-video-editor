@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::types::{
     FinalVideoTimeline, OverlayCandidate, OverlayCandidateStatus, ProjectManifest,
+    FinalVideoExport, FinalVideoExportsManifest,
     ProjectSettings, Transcript, TranscriptAnalysis, VideoJob, OverlayImagesManifest,
     DEFAULT_GROK_IMAGINE_MODEL, LEGACY_GROK_IMAGINE_MODEL_QUALITY,
 };
@@ -155,6 +156,45 @@ pub fn load_final_video_timeline(
     serde_json::from_str(&raw)
         .map(Some)
         .map_err(|e| format!("parse_final_video_timeline:{e}"))
+}
+
+pub fn final_video_exports_path(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+    Ok(devotiontime_base(paths)?
+        .join("final-video")
+        .join(format!("{video_id}.exports.json")))
+}
+
+pub fn load_final_video_exports(
+    paths: &ProjectPaths,
+    video_id: &str,
+) -> Result<FinalVideoExportsManifest, String> {
+    let path = final_video_exports_path(paths, video_id)?;
+    if !path.is_file() {
+        return Ok(FinalVideoExportsManifest {
+            video_id: video_id.to_string(),
+            exports: Vec::new(),
+        });
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read_final_video_exports:{e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse_final_video_exports:{e}"))
+}
+
+pub fn append_final_video_export(
+    paths: &ProjectPaths,
+    video_id: &str,
+    export: FinalVideoExport,
+) -> Result<FinalVideoExportsManifest, String> {
+    let path = final_video_exports_path(paths, video_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_final_video_dir:{e}"))?;
+    }
+    let mut manifest = load_final_video_exports(paths, video_id)?;
+    manifest.exports.push(export);
+    manifest.exports.sort_by(|a, b| b.exported_at.cmp(&a.exported_at));
+    let raw = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("serialize_final_video_exports:{e}"))?;
+    fs::write(&path, raw).map_err(|e| format!("write_final_video_exports:{e}"))?;
+    Ok(manifest)
 }
 
 pub fn save_overlay_images_manifest(

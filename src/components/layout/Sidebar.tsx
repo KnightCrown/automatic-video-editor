@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Home, Edit3, Image as ImageIcon, Settings } from "lucide-react";
+import { Home, Edit3, Image as ImageIcon, Video, Settings } from "lucide-react";
 import clsx from "clsx";
 import { useProject } from "../../context/ProjectContext";
 import { getOverlayImagesManifest } from "../../services/pipelineService";
@@ -32,6 +32,7 @@ export const Sidebar = () => {
     { to: "/", icon: Home, label: "Overview", end: true },
     { to: "/editing", icon: Edit3, label: "Editing", end: false },
     { to: "/gallery", icon: ImageIcon, label: "Gallery", end: false },
+    { to: "/videos", icon: Video, label: "Videos", end: false },
     { to: "/settings", icon: Settings, label: "Settings", end: false },
   ];
 

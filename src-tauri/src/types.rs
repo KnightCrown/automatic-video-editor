@@ -292,6 +292,23 @@ pub struct FinalVideoTimeline {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FinalVideoExport {
+    pub id: String,
+    pub output_path: String,
+    pub file_name: String,
+    pub exported_at: String,
+    pub clip_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalVideoExportsManifest {
+    pub video_id: String,
+    pub exports: Vec<FinalVideoExport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoExportProgress {
     pub video_id: String,
     pub stage: String,
