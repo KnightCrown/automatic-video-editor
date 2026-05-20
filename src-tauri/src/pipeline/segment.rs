@@ -5,11 +5,11 @@ use uuid::Uuid;
 use crate::types::{OverlayCandidate, OverlayCandidateStatus, Transcript, TranscriptSegment};
 
 const VISUAL_KEYWORDS: &[&str] = &[
-    "rainbow", "ark", "angel", "bible", "cross", "church", "star", "sun", "moon", "tree",
-    "flower", "animal", "lion", "sheep", "fish", "bird", "mountain", "river", "ocean", "boat",
-    "house", "castle", "crown", "heart", "light", "fire", "water", "cloud", "jesus", "god",
-    "pray", "song", "dance", "run", "jump", "smile", "friend", "family", "color", "red",
-    "blue", "green", "yellow", "big", "small", "look", "see", "watch", "draw", "paint",
+    "rainbow", "ark", "angel", "bible", "cross", "church", "star", "sun", "moon", "tree", "flower",
+    "animal", "lion", "sheep", "fish", "bird", "mountain", "river", "ocean", "boat", "house",
+    "castle", "crown", "heart", "light", "fire", "water", "cloud", "jesus", "god", "pray", "song",
+    "dance", "run", "jump", "smile", "friend", "family", "color", "red", "blue", "green", "yellow",
+    "big", "small", "look", "see", "watch", "draw", "paint",
 ];
 
 const FILLER_WORDS: &[&str] = &["um", "uh", "okay", "ok", "so", "well", "like", "you know"];
@@ -143,7 +143,9 @@ fn score_chunk(text: &str) -> (u32, Vec<String>) {
         reasons.push("exclamation".to_string());
     }
 
-    for starter in ["look", "let's", "remember", "imagine", "can you", "today we"] {
+    for starter in [
+        "look", "let's", "remember", "imagine", "can you", "today we",
+    ] {
         if lower.starts_with(starter) {
             score += 8;
             reasons.push(format!("imperative:{starter}"));
@@ -153,10 +155,7 @@ fn score_chunk(text: &str) -> (u32, Vec<String>) {
 
     let words: Vec<&str> = lower.split_whitespace().collect();
     if !words.is_empty() {
-        let filler_count = words
-            .iter()
-            .filter(|w| FILLER_WORDS.contains(w))
-            .count();
+        let filler_count = words.iter().filter(|w| FILLER_WORDS.contains(w)).count();
         if filler_count * 2 >= words.len() {
             score = score.saturating_sub(25);
             reasons.push("mostly_filler".to_string());

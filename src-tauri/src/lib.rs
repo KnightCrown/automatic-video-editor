@@ -15,16 +15,18 @@ use crate::asr::{
 use crate::audio::ffmpeg::check_ffmpeg;
 use crate::audio::waveform::ensure_audio_waveform_for_video;
 use crate::image::overlay_images;
+use crate::image::playhead_overlay::generate_playhead_ai_overlay;
 use crate::llm::openai::{
     analyze_transcript_for_overlays, api_key_storage_hint, clear_openai_api_key,
     has_openai_api_key, save_openai_api_key,
 };
 use crate::pipeline::jobs::ensure_model_and_run;
-use crate::pipeline::scan::scan_video_folder;
+use crate::pipeline::scan::scan_video_folder_with_progress;
 use crate::store::project::{
-    append_final_video_export, load_final_video_exports, load_overlay_images_manifest_for_video,
-    load_project, load_transcript, load_transcript_analysis_for_video, load_transcript_for_video,
-    project_paths, refresh_video_statuses_in_manifest, save_final_video_timeline, save_project,
+    append_final_video_export, load_final_video_exports, load_final_video_timeline,
+    load_overlay_images_manifest_for_video, load_project, load_transcript,
+    load_transcript_analysis_for_video, load_transcript_for_video, project_paths,
+    refresh_video_statuses_in_manifest, save_final_video_timeline, save_project,
     save_transcript_analysis, set_video_pipeline_status, sync_videos_in_manifest,
 };
 use crate::store::secrets::{
@@ -32,14 +34,16 @@ use crate::store::secrets::{
 };
 use crate::types::{
     AudioWaveform, FinalVideoExport, FinalVideoExportsManifest, FinalVideoTimeline,
-    OverlayImagesManifest, ProjectManifest, ProjectSettings, TimelineVideoClip, Transcript,
-    TranscriptAnalysis, TranscriptionPreflight, VideoExportPreflight,
+    OverlayImagesManifest, PlayheadOverlayResult, ProjectManifest, ProjectSettings,
+    TimelineVideoClip, Transcript, TranscriptAnalysis, TranscriptionPreflight,
+    VideoExportPreflight,
 };
 use crate::video::composite::export_video_with_overlays;
 use crate::video::encoders::refresh_video_export_preflight_cache;
 use crate::video::export_session::VideoExportController;
 use crate::video::timeline::{build_default_timeline, resolve_final_video_timeline};
 use crate::video::timeline_media::import_timeline_video;
+use tauri::Emitter;
 use tauri::Manager;
 
 /// Preferred minimum window size (logical px); clamped to the current monitor in setup.
@@ -64,15 +68,17 @@ fn apply_window_size_limits(window: &tauri::WebviewWindow) {
         .flatten()
         .or_else(|| window.primary_monitor().ok().flatten());
 
-    let (work_w, work_h) = monitor
-        .as_ref()
-        .map(work_area_logical)
-        .unwrap_or((PREFERRED_MIN_WIDTH + WINDOW_CHROME_MARGIN, PREFERRED_MIN_HEIGHT + WINDOW_CHROME_MARGIN));
+    let (work_w, work_h) = monitor.as_ref().map(work_area_logical).unwrap_or((
+        PREFERRED_MIN_WIDTH + WINDOW_CHROME_MARGIN,
+        PREFERRED_MIN_HEIGHT + WINDOW_CHROME_MARGIN,
+    ));
 
     let max_w = (work_w - WINDOW_CHROME_MARGIN).max(ABSOLUTE_MIN_WIDTH);
     let max_h = (work_h - WINDOW_CHROME_MARGIN).max(ABSOLUTE_MIN_HEIGHT);
 
-    let min_w = PREFERRED_MIN_WIDTH.min(max_w).max(ABSOLUTE_MIN_WIDTH.min(max_w));
+    let min_w = PREFERRED_MIN_WIDTH
+        .min(max_w)
+        .max(ABSOLUTE_MIN_WIDTH.min(max_w));
     let min_h = PREFERRED_MIN_HEIGHT
         .min(max_h)
         .max(ABSOLUTE_MIN_HEIGHT.min(max_h));
@@ -214,17 +220,22 @@ fn resolve_overlay_image_path(root_path: String, relative_path: String) -> Resul
 }
 
 #[tauri::command]
-fn read_overlay_image_data_url(
-    root_path: String,
-    relative_path: String,
-) -> Result<String, String> {
+fn read_overlay_image_data_url(root_path: String, relative_path: String) -> Result<String, String> {
     overlay_images::read_project_image_data_url(&root_path, &relative_path)
 }
 
 #[tauri::command]
-fn open_project(root_path: String) -> Result<ProjectManifest, String> {
-    let videos = scan_video_folder(&root_path)?;
-    sync_videos_in_manifest(&root_path, videos)
+async fn open_project(app: tauri::AppHandle, root_path: String) -> Result<ProjectManifest, String> {
+    let app_for_scan = app.clone();
+    let root_for_scan = root_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let videos = scan_video_folder_with_progress(&root_for_scan, |progress| {
+            let _ = app_for_scan.emit("project_scan_progress", &progress);
+        })?;
+        sync_videos_in_manifest(&root_path, videos)
+    })
+    .await
+    .map_err(|e| format!("open_project_task_failed:{e}"))?
 }
 
 #[tauri::command]
@@ -309,8 +320,8 @@ fn get_transcription_preflight(app: tauri::AppHandle) -> TranscriptionPreflight 
     };
 
     let parakeet_missing = missing_parakeet_files(&app).unwrap_or_default();
-    let parakeet_model_ready = parakeet_missing.is_empty()
-        && parakeet_model_ready(&app).unwrap_or(false);
+    let parakeet_model_ready =
+        parakeet_missing.is_empty() && parakeet_model_ready(&app).unwrap_or(false);
 
     TranscriptionPreflight {
         ffmpeg_available,
@@ -453,6 +464,17 @@ async fn cancel_video_export(
 }
 
 #[tauri::command]
+async fn generate_playhead_ai_overlay_cmd(
+    app: tauri::AppHandle,
+    root_path: String,
+    video_id: String,
+    playhead_ms: u64,
+) -> Result<PlayheadOverlayResult, String> {
+    let manifest = load_project(&root_path)?;
+    generate_playhead_ai_overlay(&app, root_path, video_id, playhead_ms, &manifest.settings).await
+}
+
+#[tauri::command]
 fn import_timeline_video_cmd(
     root_path: String,
     video_id: String,
@@ -477,6 +499,12 @@ async fn export_video_with_overlays_cmd(
         .iter()
         .find(|v| v.id == video_id)
         .ok_or_else(|| "video_not_found".to_string())?;
+    let paths = project_paths(&root_path)?;
+    let timeline = load_final_video_timeline(&paths, &video_id).ok().flatten();
+    let (content_start_ms, content_end_ms) = timeline
+        .map(|t| (t.content_start_ms, t.content_end_ms))
+        .unwrap_or((None, None));
+
     export_video_with_overlays(
         app,
         &controller,
@@ -487,6 +515,8 @@ async fn export_video_with_overlays_cmd(
         output_path,
         clips,
         video_clips,
+        content_start_ms,
+        content_end_ms,
     )
     .await
 }
@@ -540,6 +570,7 @@ pub fn run() {
             get_final_video_exports,
             record_final_video_export,
             import_timeline_video_cmd,
+            generate_playhead_ai_overlay_cmd,
             export_video_with_overlays_cmd,
             cancel_video_export,
         ])

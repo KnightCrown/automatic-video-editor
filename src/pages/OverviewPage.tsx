@@ -147,6 +147,7 @@ export function OverviewPage() {
   const { project, setProject, refreshProject } = useProject();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [scanProgress, setScanProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("All");
   const [search, setSearch] = useState("");
@@ -199,13 +200,17 @@ export function OverviewPage() {
     if (!selected || typeof selected !== "string") return;
 
     setLoading(true);
+    setScanProgress("Scanning folder for video files…");
     try {
-      const manifest = await openProject(selected);
+      const manifest = await openProject(selected, (progress) => {
+        setScanProgress(progress.message ?? progress.fileName ?? "Scanning…");
+      });
       setProject(manifest);
     } catch (err) {
       setError(String(err));
     } finally {
       setLoading(false);
+      setScanProgress(null);
     }
   }
 
@@ -395,6 +400,10 @@ export function OverviewPage() {
         <p className="text-sm text-[#EAB308] mb-4">
           Transcription setup incomplete — check FFmpeg and Parakeet model in Settings.
         </p>
+      )}
+
+      {scanProgress && (
+        <p className="text-sm text-textMuted mb-4">{scanProgress}</p>
       )}
 
       {error && (
@@ -682,7 +691,7 @@ export function OverviewPage() {
           </div>
         </div>
       ) : (
-        <OverviewEmptyState pickFolder={pickFolder} loading={loading} />
+        <OverviewEmptyState pickFolder={pickFolder} loading={loading} scanProgress={scanProgress} />
       )}
     </div>
   );
@@ -764,9 +773,11 @@ function OverviewTipsCard({ navigate }: { navigate: ReturnType<typeof useNavigat
 function OverviewEmptyState({
   pickFolder,
   loading,
+  scanProgress,
 }: {
   pickFolder: () => void;
   loading: boolean;
+  scanProgress: string | null;
 }) {
   return (
     <div className="flex-1 flex items-center justify-center border-2 border-dashed border-border rounded-xl">
@@ -787,6 +798,9 @@ function OverviewEmptyState({
           <FolderUp size={18} />
           {loading ? "Importing..." : "Import folder now"}
         </button>
+        {scanProgress ? (
+          <p className="text-textMuted text-sm mt-3 max-w-sm mx-auto">{scanProgress}</p>
+        ) : null}
       </div>
     </div>
   );

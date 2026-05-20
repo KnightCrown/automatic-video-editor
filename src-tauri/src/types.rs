@@ -81,12 +81,78 @@ pub struct OverlaySuggestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EpisodeContentBounds {
+    pub content_start_ms: u64,
+    pub content_end_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_duration_ms: Option<u64>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetPlacement {
+    pub id: String,
+    pub asset_file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_word: Option<String>,
+    #[serde(default = "default_asset_placement_kind")]
+    pub placement_kind: String,
+    #[serde(default = "default_timeline_mode")]
+    pub timeline_mode: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_excerpt: Option<String>,
+    pub verified: bool,
+    pub rationale: String,
+    #[serde(default = "default_asset_track_index")]
+    pub track_index: u32,
+    #[serde(default)]
+    pub full_screen: bool,
+}
+
+fn default_asset_track_index() -> u32 {
+    1
+}
+
+fn default_asset_placement_kind() -> String {
+    "trigger".to_string()
+}
+
+fn default_timeline_mode() -> String {
+    "overlay".to_string()
+}
+
+/// Pre-LLM candidate passed to the model for verification (not persisted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedAssetTrigger {
+    pub asset_file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_word: Option<String>,
+    pub placement_kind: String,
+    #[serde(default = "default_timeline_mode")]
+    pub timeline_mode: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub transcript_excerpt: String,
+    #[serde(default)]
+    pub full_screen: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptAnalysis {
     pub video_id: String,
     pub bible_stories: Vec<String>,
     pub suggestions: Vec<OverlaySuggestion>,
     pub analyzed_at: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_bounds: Option<EpisodeContentBounds>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_placements: Vec<AssetPlacement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,8 +248,20 @@ pub struct PipelineProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectScanProgress {
+    pub index: u32,
+    pub total: u32,
+    pub file_name: String,
+    pub stage: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSettings {
     pub show_context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_folder_path: Option<String>,
     pub max_candidates_per_video: u32,
     pub openai_text_model: String,
     pub openai_image_model: String,
@@ -227,6 +305,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             show_context: "Christian kids YouTube show. Friendly, colorful, simple overlays. No scary or violent imagery.".to_string(),
+            asset_folder_path: None,
             max_candidates_per_video: 10,
             openai_text_model: "gpt-4.1-mini".to_string(),
             openai_image_model: "gpt-image-1".to_string(),
@@ -288,6 +367,12 @@ pub struct VideoOverlayClip {
     pub exit: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayheadOverlayResult {
+    pub clip: VideoOverlayClip,
+}
+
 /// Extra video placed on a timeline track above the base episode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -295,6 +380,10 @@ pub struct TimelineVideoClip {
     pub id: String,
     pub source_relative_path: String,
     pub file_name: String,
+    #[serde(default = "default_timeline_mode")]
+    pub timeline_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_kind: Option<String>,
     pub start_ms: u64,
     pub duration_ms: u64,
     pub source_duration_ms: u64,
@@ -316,6 +405,10 @@ pub struct FinalVideoTimeline {
     pub clips: Vec<VideoOverlayClip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub video_clips: Vec<TimelineVideoClip>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_end_ms: Option<u64>,
     pub updated_at: String,
 }
 

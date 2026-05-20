@@ -8,12 +8,14 @@ import type {
   OverlayImagesManifest,
   PipelineProgress,
   ProjectManifest,
+  ProjectScanProgress,
   ProjectSettings,
   Transcript,
   TranscriptAnalysis,
   TranscriptionPreflight,
   VideoExportPreflight,
   VideoExportProgress,
+  PlayheadOverlayResult,
   TimelineVideoClip,
   VideoOverlayClip,
 } from "../types/pipeline";
@@ -26,8 +28,23 @@ export async function getVideoExportPreflight(): Promise<VideoExportPreflight> {
   return invoke<VideoExportPreflight>("get_video_export_preflight");
 }
 
-export async function openProject(rootPath: string): Promise<ProjectManifest> {
-  return invoke<ProjectManifest>("open_project", { rootPath });
+export async function openProject(
+  rootPath: string,
+  onProgress?: (progress: ProjectScanProgress) => void,
+): Promise<ProjectManifest> {
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<ProjectScanProgress>("project_scan_progress", (event) => {
+      onProgress(event.payload);
+    });
+  }
+  try {
+    return invoke<ProjectManifest>("open_project", { rootPath });
+  } finally {
+    if (unlisten) {
+      await unlisten();
+    }
+  }
 }
 
 export async function getProject(rootPath: string): Promise<ProjectManifest> {
@@ -334,6 +351,31 @@ export async function importTimelineVideo(
     videoId,
     sourcePath,
   });
+}
+
+export async function generatePlayheadAiOverlay(
+  rootPath: string,
+  videoId: string,
+  playheadMs: number,
+  onProgress?: (progress: ImageGenerationProgress) => void,
+): Promise<PlayheadOverlayResult> {
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<ImageGenerationProgress>("image_generation_progress", (event) => {
+      onProgress(event.payload);
+    });
+  }
+  try {
+    return invoke<PlayheadOverlayResult>("generate_playhead_ai_overlay_cmd", {
+      rootPath,
+      videoId,
+      playheadMs,
+    });
+  } finally {
+    if (unlisten) {
+      await unlisten();
+    }
+  }
 }
 
 export async function exportFinalVideo(

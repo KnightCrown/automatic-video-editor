@@ -26,7 +26,7 @@ import type {
   VideoJob,
   VideoOverlayClip,
 } from "../../types/pipeline";
-import { getOverlayImageDisplayUrl, importTimelineVideo } from "../../services/pipelineService";
+import { getOverlayImageDisplayUrl, generatePlayheadAiOverlay, importTimelineVideo } from "../../services/pipelineService";
 import { clipEndMs, formatTimeMs } from "../../utils/overlayClips";
 import {
   editorRectToLayout,
@@ -46,6 +46,7 @@ import {
   normalizeVideoClip,
   videoClipEndMs,
 } from "../../utils/timelineVideoClips";
+import { VIDEO_FILE_DIALOG_FILTER } from "../../utils/videoExtensions";
 
 const TIME_STEP_MS = 500;
 
@@ -131,6 +132,9 @@ export function VideoEditorModal({
   const [format, setFormat] = useState("MP4");
   const [quality, setQuality] = useState("high");
   const [includeIntroOutro, setIncludeIntroOutro] = useState(true);
+  const [showAiOverlayConfirm, setShowAiOverlayConfirm] = useState(false);
+  const [addingAiOverlay, setAddingAiOverlay] = useState(false);
+  const [aiOverlayError, setAiOverlayError] = useState<string | null>(null);
 
   useEffect(() => {
     const nextClips = initialClips.map(normalizeClip);
@@ -430,6 +434,12 @@ export function VideoEditorModal({
     if (original) updateVideoClip(selectedVideoClip.id, normalizeVideoClip(original));
   }, [initialClips, initialVideoClips, selectedOverlay, selectedVideoClip, updateClip, updateVideoClip]);
 
+  const handleVideoClipsChange = useCallback((next: TimelineVideoClip[]) => {
+    setVideoClips(next);
+    const usedTracks = new Set(next.map((clip) => clip.trackIndex));
+    setEmptyTrackIndices((current) => current.filter((idx) => !usedTracks.has(idx)));
+  }, []);
+
   const handleAddTrack = useCallback(() => {
     const nextIndex = maxVideoTrackIndex(videoClips, emptyTrackIndices) + 1;
     setEmptyTrackIndices((current) => [...current, nextIndex]);
@@ -438,7 +448,7 @@ export function VideoEditorModal({
   const handleAddMedia = useCallback(async () => {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "Video", extensions: ["mp4", "mov", "mkv", "webm", "m4v"] }],
+      filters: [VIDEO_FILE_DIALOG_FILTER],
     });
     if (!selected || typeof selected !== "string") return;
 
@@ -458,6 +468,34 @@ export function VideoEditorModal({
       console.error("Failed to import timeline video:", err);
     }
   }, [currentMs, emptyTrackIndices, rootPath, safeDurationMs, video.id, videoClips]);
+
+  const handleConfirmAiOverlay = useCallback(async () => {
+    setShowAiOverlayConfirm(false);
+    setAiOverlayError(null);
+    setAddingAiOverlay(true);
+    try {
+      const result = await generatePlayheadAiOverlay(rootPath, video.id, currentMs);
+      const newClip = normalizeClip(result.clip);
+      const nextClips = [...clips, newClip];
+      setClips(nextClips);
+      const url = await getOverlayImageDisplayUrl(rootPath, newClip.imageRelativePath);
+      setImageUrls((current) => ({ ...current, [newClip.suggestionId]: url }));
+      setSelected({ kind: "overlay", id: newClip.suggestionId });
+      handleSeek(newClip.startMs);
+      setSaving(true);
+      try {
+        await onSave({ clips: nextClips, videoClips });
+      } finally {
+        setSaving(false);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setAiOverlayError(message);
+      console.error("Failed to generate AI overlay:", err);
+    } finally {
+      setAddingAiOverlay(false);
+    }
+  }, [clips, currentMs, handleSeek, onSave, rootPath, video.id, videoClips]);
 
   const estimatedMb = estimateFileSizeMb(safeDurationMs, clips.length, quality);
 
@@ -537,13 +575,21 @@ export function VideoEditorModal({
               audioWaveform={audioWaveform}
               fitToWidth
               onClipsChange={setClips}
-              onVideoClipsChange={setVideoClips}
+              onVideoClipsChange={handleVideoClipsChange}
               onSelect={setSelected}
               onSeek={handleSeek}
               onPxPerMsChange={setPxPerMs}
               onAddTrack={handleAddTrack}
               onAddMedia={() => void handleAddMedia()}
+              onAddAiOverlay={() => setShowAiOverlayConfirm(true)}
+              addingAiOverlay={addingAiOverlay}
             />
+
+            {aiOverlayError ? (
+              <p className="video-editor-ai-overlay-error" role="alert">
+                {aiOverlayError}
+              </p>
+            ) : null}
 
             <section className="video-overlay-list-panel">
               <div className="video-overlay-list-header">
@@ -798,6 +844,46 @@ export function VideoEditorModal({
           </aside>
         </div>
       </div>
+
+      {showAiOverlayConfirm ? (
+        <div
+          className="video-editor-confirm-backdrop"
+          role="presentation"
+          onClick={() => setShowAiOverlayConfirm(false)}
+        >
+          <div
+            className="video-editor-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-overlay-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="ai-overlay-confirm-title">Generate AI overlay?</h3>
+            <p>
+              Do you want to generate an AI overlay at the playhead (
+              {formatTimeMs(currentMs)}) using the transcript at that moment?
+            </p>
+            <div className="video-editor-confirm-actions">
+              <button
+                type="button"
+                className="video-editor-secondary-button"
+                onClick={() => setShowAiOverlayConfirm(false)}
+                disabled={addingAiOverlay}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                className="video-editor-primary-button"
+                onClick={() => void handleConfirmAiOverlay()}
+                disabled={addingAiOverlay}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

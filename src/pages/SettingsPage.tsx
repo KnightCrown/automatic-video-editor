@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   RefreshCw,
   Trash2,
@@ -6,6 +7,9 @@ import {
   Sparkles,
   Mic,
   Film,
+  FolderOpen,
+  Info,
+  X,
 } from "lucide-react";
 import { OverlaySettingsModal } from "../components/OverlaySettingsModal";
 import { useProject } from "../context/ProjectContext";
@@ -51,6 +55,16 @@ function encoderKindLabel(kind: VideoExportEncoderKind): string {
   }
 }
 
+const TEXT_MODEL_OPTIONS = [
+  { value: "gpt-4.1-mini", label: "GPT 4.1 Mini" },
+  { value: "gpt-5.4-mini", label: "GPT 5.4 Mini" },
+] as const;
+
+function normalizeTextModel(model: string): string {
+  if (model === "gpt-5.4-mini" || model === "gpt-5.4") return "gpt-5.4-mini";
+  return "gpt-4.1-mini";
+}
+
 export function SettingsPage() {
   const { project, setProject } = useProject();
   const [modelReady, setModelReady] = useState(false);
@@ -71,6 +85,9 @@ export function SettingsPage() {
   const [showContext, setShowContext] = useState(
     project?.settings.showContext ??
       "Christian kids YouTube show. Friendly, colorful, simple overlays.",
+  );
+  const [assetFolderPath, setAssetFolderPath] = useState(
+    project?.settings.assetFolderPath ?? "",
   );
   const [textModel, setTextModel] = useState(
     project?.settings.openaiTextModel ?? "gpt-4.1-mini",
@@ -94,6 +111,7 @@ export function SettingsPage() {
     overlayLayoutFromSettings(project?.settings),
   );
   const [overlaySettingsOpen, setOverlaySettingsOpen] = useState(false);
+  const [promptHelpOpen, setPromptHelpOpen] = useState(false);
 
   useEffect(() => {
     void refreshModelStatus();
@@ -104,7 +122,8 @@ export function SettingsPage() {
   useEffect(() => {
     if (!project) return;
     setShowContext(project.settings.showContext);
-    setTextModel(project.settings.openaiTextModel);
+    setAssetFolderPath(project.settings.assetFolderPath ?? "");
+    setTextModel(normalizeTextModel(project.settings.openaiTextModel));
     setGrokImagineModel(project.settings.grokImagineModel ?? "grok-imagine-image");
     setTranscriptTimingOffsetMs(project.settings.transcriptTimingOffsetMs ?? 0);
     setVideoExportMode(project.settings.videoExportMode ?? "auto");
@@ -195,6 +214,7 @@ export function SettingsPage() {
       const manifest = await updateProjectSettings(project.rootPath, {
         ...project.settings,
         showContext,
+        assetFolderPath: assetFolderPath.trim() || undefined,
         openaiTextModel: textModel,
         grokImagineModel,
         transcriptTimingOffsetMs: (() => {
@@ -229,6 +249,17 @@ export function SettingsPage() {
       setMessage("Overlay position saved.");
     } catch (err) {
       setError(String(err));
+    }
+  }
+
+  async function handleSelectAssetFolder() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select asset folder",
+    });
+    if (selected && typeof selected === "string") {
+      setAssetFolderPath(selected);
     }
   }
 
@@ -315,7 +346,7 @@ export function SettingsPage() {
               label="OpenAI model"
               value={textModel}
               onChange={setTextModel}
-              options={["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o", "gpt-4.1"]}
+              options={TEXT_MODEL_OPTIONS}
             />
             <SettingSelect
               label="Image model"
@@ -332,13 +363,29 @@ export function SettingsPage() {
           </h2>
           <div className="p-5 space-y-4 flex-1">
             <label className="block">
-              <span className="text-sm text-white block mb-1.5">Show context (system prompt)</span>
+              <span className="text-sm text-white mb-1.5 flex items-center gap-2">
+                Show context (system prompt)
+                <button
+                  type="button"
+                  onClick={() => setPromptHelpOpen(true)}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-textMuted hover:text-white hover:border-primary"
+                  aria-label="Show system prompt examples"
+                  title="Prompt examples"
+                >
+                  <Info size={14} />
+                </button>
+              </span>
               <textarea
-                rows={3}
+                rows={5}
                 value={showContext}
                 onChange={(e) => setShowContext(e.target.value)}
+                placeholder="Describe the video style, reusable assets, intro/outro rules, and when specific assets should appear."
                 className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
               />
+              <p className="text-xs text-textMuted mt-2">
+                Saved with this project and reused when the app restarts. Use it for visual style,
+                production rules, and asset instructions.
+              </p>
             </label>
             <SettingSelect
               label="Export mode"
@@ -390,9 +437,48 @@ export function SettingsPage() {
             >
               Overlay settings
             </button>
+            <div className="pt-4 border-t border-border space-y-3">
+              <div className="flex items-start gap-3">
+                <FolderOpen className="text-[#8B5CF6] mt-0.5" size={17} />
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Asset folder</h3>
+                  <p className="text-xs text-textMuted mt-1">
+                    Select a folder where your assets are stored. You can reference assets in this
+                    folder in your master prompt, for example: add the intro at the start of the
+                    video and play the surprise clip each time I say surprise.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={assetFolderPath}
+                  readOnly
+                  placeholder="No asset folder selected"
+                  className="flex-1 min-w-0 bg-background border border-border rounded-lg px-3 py-2 text-sm text-white placeholder:text-textMuted focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSelectAssetFolder()}
+                  className="px-3 py-2 rounded-lg text-sm border border-border text-white hover:bg-background"
+                >
+                  Select
+                </button>
+                {assetFolderPath ? (
+                  <button
+                    type="button"
+                    onClick={() => setAssetFolderPath("")}
+                    className="px-3 py-2 rounded-lg text-sm border border-border text-textMuted hover:text-white hover:bg-background"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       </div>
+
+      <PromptHelpModal open={promptHelpOpen} onClose={() => setPromptHelpOpen(false)} />
 
       <OverlaySettingsModal
         open={overlaySettingsOpen}
@@ -429,6 +515,82 @@ function StatusBadge({ ready, readyLabel, missingLabel }: { ready: boolean; read
     >
       {ready ? readyLabel : missingLabel}
     </span>
+  );
+}
+
+function PromptHelpModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  const examples = [
+    {
+      title: "Describe the visual style",
+      text: "Make the episode feel like bright 2D storybook Bible art with clear expressions, warm lighting, and no scary imagery.",
+    },
+    {
+      title: "Add intro and outro assets",
+      text: "I have intro.mp4 and outro.mp4 in my asset folder. Start every video with intro.mp4, then play the episode, then add outro.mp4 at the end.",
+    },
+    {
+      title: "Trigger an overlay from speech",
+      text: "Each time the host says yay, play yay.mp4 as an overlay in the default overlay position for two seconds.",
+    },
+    {
+      title: "Use a full-screen asset",
+      text: "When the host says surprise, play surprise.mp4 as a full-screen overlay, then continue the episode.",
+    },
+    {
+      title: "Give editing rules",
+      text: "Keep overlays playful but readable. Avoid covering faces. Use asset clips only when they support the spoken moment.",
+    },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="prompt-help-title"
+        className="w-full max-w-2xl rounded-xl border border-border bg-surface shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+          <div>
+            <h2 id="prompt-help-title" className="text-lg font-semibold text-white">
+              System prompt examples
+            </h2>
+            <p className="mt-1 text-sm text-textMuted">
+              Use this field as a master prompt for style, asset placement, and smart editing
+              rules. The prompt is saved with the project.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-border text-textMuted hover:text-white hover:bg-background"
+            aria-label="Close prompt examples"
+          >
+            <X size={17} />
+          </button>
+        </div>
+        <div className="max-h-[65vh] overflow-y-auto p-5 space-y-4">
+          {examples.map((example) => (
+            <div key={example.title} className="rounded-lg border border-border bg-background/70 p-4">
+              <h3 className="text-sm font-semibold text-white">{example.title}</h3>
+              <p className="mt-2 text-sm text-textMuted">{example.text}</p>
+            </div>
+          ))}
+          <p className="text-xs text-textMuted">
+            Asset names should match files in the selected asset folder, such as intro.mp4,
+            outro.mp4, yay.mp4, or surprise.mp4.
+          </p>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -506,8 +668,11 @@ function SettingSelect({
   label: string;
   value: string;
   onChange: (v: string) => void;
-  options: string[];
+  options: readonly string[] | readonly { value: string; label: string }[];
 }) {
+  const entries = options.map((o) =>
+    typeof o === "string" ? { value: o, label: o } : o,
+  );
   return (
     <div className="flex justify-between items-center gap-4">
       <span className="text-sm text-white">{label}</span>
@@ -516,9 +681,9 @@ function SettingSelect({
         onChange={(e) => onChange(e.target.value)}
         className="bg-background border border-border rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none w-48"
       >
-        {options.map((o) => (
-          <option key={o} value={o}>
-            {o}
+        {entries.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>
@@ -540,7 +705,7 @@ function ApiKeySection({
   footerLink,
 }: {
   title: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   description: string;
   keyValue: string;
   onKeyChange: (v: string) => void;
@@ -549,7 +714,7 @@ function ApiKeySection({
   placeholder: string;
   onSave: () => void;
   onClear: () => void;
-  footerLink?: React.ReactNode;
+  footerLink?: ReactNode;
 }) {
   return (
     <section>
@@ -582,7 +747,7 @@ function ApiKeyActions({
 }: {
   onSave: () => void;
   onClear: () => void;
-  footerLink?: React.ReactNode;
+  footerLink?: ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between flex-wrap gap-3">

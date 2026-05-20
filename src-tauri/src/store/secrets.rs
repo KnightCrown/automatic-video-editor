@@ -52,8 +52,7 @@ fn read_secrets_file() -> SecretsFile {
 fn write_secrets_file(s: &SecretsFile) -> Result<(), String> {
     let path = secrets_file_path();
     ensure_secrets_dir(&path)?;
-    let raw =
-        serde_json::to_string_pretty(s).map_err(|e| format!("serialize_secrets:{e}"))?;
+    let raw = serde_json::to_string_pretty(s).map_err(|e| format!("serialize_secrets:{e}"))?;
     fs::write(&path, raw).map_err(|e| format!("write_secrets_failed:{e}"))?;
     #[cfg(unix)]
     {

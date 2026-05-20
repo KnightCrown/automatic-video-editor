@@ -931,16 +931,21 @@ function OverlaysTabContent({
       )}
 
       {hasAnalysis && analysis && (
-        <OverlaySuggestionsTable
-          analysis={analysis}
-          generatedSuggestionIds={generatedSuggestionIds}
-          displayUrls={displayUrls}
-          selectedSuggestionId={selectedSuggestionId}
-          approvedSuggestionIds={approvedSuggestionIds}
-          onSelectSuggestion={onSelectSuggestion}
-          onToggleApproval={onToggleApproval}
-          onOpenLightbox={onOpenLightbox}
-        />
+        <>
+          {(analysis.contentBounds || (analysis.assetPlacements?.length ?? 0) > 0) && (
+            <AnalysisMetaPanel analysis={analysis} />
+          )}
+          <OverlaySuggestionsTable
+            analysis={analysis}
+            generatedSuggestionIds={generatedSuggestionIds}
+            displayUrls={displayUrls}
+            selectedSuggestionId={selectedSuggestionId}
+            approvedSuggestionIds={approvedSuggestionIds}
+            onSelectSuggestion={onSelectSuggestion}
+            onToggleApproval={onToggleApproval}
+            onOpenLightbox={onOpenLightbox}
+          />
+        </>
       )}
 
       {!hasAnalysis && !analyzing && (
@@ -950,6 +955,48 @@ function OverlaysTabContent({
         />
       )}
     </div>
+  );
+}
+
+function AnalysisMetaPanel({ analysis }: { analysis: TranscriptAnalysis }) {
+  const bounds = analysis.contentBounds;
+  const assets = analysis.assetPlacements ?? [];
+
+  return (
+    <section className="rounded-xl border border-border bg-surface/80 p-4 space-y-3 flex-shrink-0">
+      {bounds ? (
+        <div>
+          <h4 className="text-sm font-semibold text-white">Episode content window</h4>
+          <p className="text-sm text-textMuted mt-1">
+            Actual content: {formatTimeRangeMs(bounds.contentStartMs, bounds.contentEndMs)}
+            {bounds.videoDurationMs
+              ? ` · file duration ${formatTimeRangeMs(0, bounds.videoDurationMs)}`
+              : null}
+          </p>
+          <p className="text-xs text-textMuted mt-1">{bounds.rationale}</p>
+        </div>
+      ) : null}
+      {assets.length > 0 ? (
+        <div>
+          <h4 className="text-sm font-semibold text-white">Asset placements ({assets.length})</h4>
+          <ul className="mt-2 space-y-2">
+            {assets.map((asset) => (
+              <li
+                key={asset.id}
+                className="text-sm text-textMuted border border-border rounded-lg px-3 py-2 bg-background/60"
+              >
+                <strong className="text-white">{asset.assetFileName}</strong>
+                {" · "}
+                {formatTimeRangeMs(asset.startMs, asset.startMs + asset.durationMs)}
+                {asset.triggerWord ? ` · trigger “${asset.triggerWord}”` : ""}
+                {asset.verified ? " · verified" : " · rejected"}
+                <span className="block text-xs mt-1">{asset.rationale}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

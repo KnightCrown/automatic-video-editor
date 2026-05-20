@@ -5,12 +5,16 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::pipeline::assets::{
+    list_video_assets, propose_asset_triggers, provisional_content_end_ms,
+};
 use crate::types::{
-    OverlayCandidate, OverlayPromptResult, OverlaySuggestion, ProjectSettings, Transcript,
-    TranscriptAnalysis, TranscriptSegment,
+    AssetPlacement, EpisodeContentBounds, OverlayCandidate, OverlayPromptResult, OverlaySuggestion,
+    ProjectSettings, ProposedAssetTrigger, Transcript, TranscriptAnalysis, TranscriptSegment,
 };
 
 use crate::store::secrets;
+use crate::video::encoders::probe_video_duration_sec;
 
 /// Full production brief for overlay planning and image-prompt style (see `overlay_master_prompt.txt`).
 const OVERLAY_MASTER_PROMPT: &str = include_str!("overlay_master_prompt.txt");
@@ -24,6 +28,15 @@ const MAX_TRANSCRIPT_ALIGN_MS: u64 = 15_000;
 /// Ceiling for suggested on-screen overlay duration returned by the model.
 const MAX_IDEAL_DISPLAY_MS: u64 = 15_000;
 
+/// Maps UI preset ids to the OpenAI model id used for text/LLM calls.
+pub fn resolve_openai_text_model(settings: &ProjectSettings) -> String {
+    match settings.openai_text_model.trim() {
+        "gpt-5.4-mini" | "gpt-5.4" => "gpt-5.4-mini".to_string(),
+        "gpt-4.1-mini" => "gpt-4.1-mini".to_string(),
+        _ => "gpt-4.1-mini".to_string(),
+    }
+}
+
 /// Which time bucket a word occupies when spreading `n_words` evenly across `[0,dur_ms)`.
 fn word_mid_bucket(word_i: usize, n_words: usize, num_chunks: usize, dur_ms: u64) -> usize {
     let nc = num_chunks.max(1);
@@ -31,8 +44,7 @@ fn word_mid_bucket(word_i: usize, n_words: usize, num_chunks: usize, dur_ms: u64
     debug_assert!(word_i < n_words);
     let denom = ((2 * n_words) as u64).max(1);
     let mid_rel_ms = dur_ms.saturating_mul((2 * word_i + 1) as u64) / denom;
-    let bi =
-        (((mid_rel_ms as u128) * (nc as u128)) / ((dur_ms.max(1)) as u128)) as usize;
+    let bi = (((mid_rel_ms as u128) * (nc as u128)) / ((dur_ms.max(1)) as u128)) as usize;
     bi.min(nc.saturating_sub(1)).max(0)
 }
 
@@ -163,9 +175,35 @@ fn require_openai_api_key() -> Result<String, String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenAiContentBoundsPayload {
+    content_start_ms: u64,
+    content_end_ms: u64,
+    rationale: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAiAssetReviewPayload {
+    asset_file_name: String,
+    #[serde(default)]
+    trigger_word: Option<String>,
+    proposed_start_ms: u64,
+    duration_ms: u64,
+    verified: bool,
+    rationale: String,
+    #[serde(default)]
+    full_screen: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OpenAiAnalysisPayload {
     bible_stories: Vec<String>,
     suggestions: Vec<OpenAiSuggestionPayload>,
+    #[serde(default)]
+    content_bounds: Option<OpenAiContentBoundsPayload>,
+    #[serde(default)]
+    asset_reviews: Vec<OpenAiAssetReviewPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +225,80 @@ struct OpenAiSuggestionPayload {
     rationale: String,
 }
 
+fn merge_asset_placements(
+    proposed: &[ProposedAssetTrigger],
+    reviews: &[OpenAiAssetReviewPayload],
+) -> Vec<AssetPlacement> {
+    if reviews.is_empty() {
+        return proposed
+            .iter()
+            .map(|p| AssetPlacement {
+                id: Uuid::new_v4().to_string(),
+                asset_file_name: p.asset_file_name.clone(),
+                trigger_word: p.trigger_word.clone(),
+                placement_kind: p.placement_kind.clone(),
+                timeline_mode: p.timeline_mode.clone(),
+                start_ms: p.start_ms,
+                duration_ms: p.duration_ms,
+                transcript_excerpt: Some(p.transcript_excerpt.clone()),
+                verified: true,
+                rationale: "Accepted from transcript word match.".to_string(),
+                track_index: if p.timeline_mode == "insert"
+                    || p.placement_kind == "intro"
+                    || p.placement_kind == "outro"
+                {
+                    2
+                } else {
+                    1
+                },
+                full_screen: p.full_screen,
+            })
+            .collect();
+    }
+
+    reviews
+        .iter()
+        .filter(|r| r.verified)
+        .map(|r| {
+            let from_proposed = proposed
+                .iter()
+                .filter(|p| p.asset_file_name.eq_ignore_ascii_case(&r.asset_file_name))
+                .min_by_key(|p| p.start_ms.abs_diff(r.proposed_start_ms));
+            AssetPlacement {
+                id: Uuid::new_v4().to_string(),
+                asset_file_name: r.asset_file_name.clone(),
+                trigger_word: r.trigger_word.clone(),
+                placement_kind: from_proposed
+                    .map(|p| p.placement_kind.clone())
+                    .unwrap_or_else(|| "trigger".to_string()),
+                timeline_mode: from_proposed
+                    .map(|p| p.timeline_mode.clone())
+                    .unwrap_or_else(|| "overlay".to_string()),
+                start_ms: r.proposed_start_ms,
+                duration_ms: r.duration_ms,
+                transcript_excerpt: from_proposed.map(|p| p.transcript_excerpt.clone()),
+                verified: true,
+                rationale: r.rationale.trim().to_string(),
+                track_index: from_proposed
+                    .map(|p| {
+                        if p.timeline_mode == "insert"
+                            || p.placement_kind == "intro"
+                            || p.placement_kind == "outro"
+                        {
+                            2
+                        } else {
+                            1
+                        }
+                    })
+                    .unwrap_or(1),
+                full_screen: from_proposed
+                    .map(|p| p.full_screen)
+                    .unwrap_or(r.full_screen),
+            }
+        })
+        .collect()
+}
+
 pub async fn analyze_transcript_for_overlays(
     transcript: &Transcript,
     settings: &ProjectSettings,
@@ -200,7 +312,47 @@ pub async fn analyze_transcript_for_overlays(
     }
 
     let api_key = require_openai_api_key()?;
-    let model = settings.openai_text_model.clone();
+    let model = resolve_openai_text_model(settings);
+
+    let video_duration_ms = probe_video_duration_sec(&transcript.video_path)
+        .map(|s| (s * 1000.0).round().max(1.0) as u64)
+        .unwrap_or_else(|_| transcript.segments.last().map(|s| s.end_ms).unwrap_or(0));
+
+    let asset_folder = settings
+        .asset_folder_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::Path::new);
+
+    let provisional_end = provisional_content_end_ms(transcript, video_duration_ms);
+    let proposed_triggers = propose_asset_triggers(
+        transcript,
+        &settings.show_context,
+        asset_folder,
+        video_duration_ms,
+        provisional_end,
+    );
+
+    let asset_files = asset_folder.map(list_video_assets).unwrap_or_default();
+
+    let asset_context = asset_folder
+        .map(|path| {
+            let listing = if asset_files.is_empty() {
+                "(no video files found)".to_string()
+            } else {
+                asset_files.join(", ")
+            };
+            format!(
+                "Configured asset folder: {path}\nAvailable video assets: {listing}\n\
+                 ASSET RULES: When the show context names an asset file, do NOT create an AI image suggestion for that moment. \
+                 Instead verify the proposed asset trigger in assetReviews. Use real asset files only — never invent filenames.",
+                path = path.display(),
+            )
+        })
+        .unwrap_or_else(|| "No asset folder configured.".to_string());
+
+    let proposed_json =
+        serde_json::to_string_pretty(&proposed_triggers).unwrap_or_else(|_| "[]".to_string());
 
     let system_prompt = format!(
         "{master}\n\n\
@@ -208,36 +360,35 @@ pub async fn analyze_transcript_for_overlays(
          SHOW-SPECIFIC CONTEXT (from the production team)\n\
          {show}\n\n\
          ---\n\
+         ASSET FOLDER CONTEXT\n\
+         {asset_context}\n\n\
+         ---\n\
          STRUCTURED JSON OUTPUT\n\
-         Follow every rule in the master brief above. Maximum 30 suggestions per episode (fewer is fine).\n\n\
-         1) bibleStories: string array — every Bible story or biblical narrative discussed or referenced.\n\
-         2) suggestions: array of objects, one per meaningful visual beat (not every sentence).\n\n\
+         Follow every rule in the master brief above. Maximum 30 AI image suggestions per episode (fewer is fine).\n\n\
+         Return ONLY valid JSON with keys:\n\
+         - bibleStories: string[]\n\
+         - contentBounds: {{ contentStartMs, contentEndMs, rationale }} — when the episode **actually** begins and ends for viewers \
+         (skip dead air, false starts, mic checks, and rambling before the real intro like \"hello/good morning\"; \
+         trim trailing dead space and sign-offs after the episode ends). Use slice timings; video file duration is {video_duration_ms} ms.\n\
+         - assetReviews: array — double-check each **Proposed asset trigger** from the user message. \
+         For each: {{ assetFileName, triggerWord (optional), proposedStartMs, durationMs, verified (bool), rationale, fullScreen (bool) }}. \
+         Set verified=false if the timestamp does not match the show context, wrong word, rehearsal/false take, or dead air.\n\
+         - suggestions: AI **image** overlays only — never for moments covered by assetReviews with verified=true.\n\n\
          TIMESTAMPED CONTEXT\n\
-         The user message lists **Timestamped sentence slices** (~Parakeet ASR sentences, each slice roughly ≤ {} ms of audio).\n\
+         The user message lists **Timestamped sentence slices** (~Parakeet ASR sentences, each slice roughly ≤ {slice_ms} ms of audio).\n\
          Each line `[n]` has exact start/end times and text — use those milliseconds only when returning startMs/endMs.\n\
-         IMPORTANT: Prefer **narrow** spans: each suggestion's **(endMs - startMs)** must stay **≤ {} ms** (~{} s).\n\
-         Prefer one or a few adjacent slice ids per beat; merge ideas only when the visual truly stays unchanged.\n\n\
-         For each suggestion:\n\
-         - title: short, specific label for that visual beat (avoid generic titles like \"Scene 1\").\n\
-         - imagePrompt: one detailed text-to-image prompt that ALREADY reflects the MASTER VISUAL STYLE \
-         (clean 2D educational storybook Bible art: bold outlines, flat bright colors, believable adult vs child proportions; not chibi or super-deformed). \
-         Describe characters, setting, action, and mood so an image model can render one clear scene. No photorealism.\n\
-         - overlayText: optional string — max 8 words. Short line a child reads at a glance: emotionally clear, warm, simple. \
-         Must not repeat the title verbatim. Avoid scripture typography or verse dumps unless the host explicitly reads that text as on-screen wording. \
-         Prefer a feeling, invitation, or plain-language takeaway rather than label-style text.\n\
-         - transcriptExcerpt: quote from the transcript this beat supports.\n\
-         - startMs / endMs: copy from the numbered sentence slices wherever possible.\n\
-         - idealDisplayMs: **required** — how long editors should typically keep THIS image visible on-screen (milliseconds). \
-         Aim at or below narration pace; **never above {}**. Shorter beats (≤ 8 s typical) beat long holds.\n\
-         - bibleStory: optional — which biblical narrative this ties to, if any.\n\
-         - rationale: one sentence on why this beat earns an overlay and how it follows segmentation / skip rules.\n\n\
-         Return ONLY valid JSON: {{ \"bibleStories\": string[], \"suggestions\": [...] }}.",
-         MAX_LLM_SEGMENT_SLICE_MS,
-         MAX_TRANSCRIPT_ALIGN_MS,
-         MAX_TRANSCRIPT_ALIGN_MS / 1000,
-         MAX_IDEAL_DISPLAY_MS,
+         IMPORTANT: Prefer **narrow** spans: each suggestion's **(endMs - startMs)** must stay **≤ {align_ms} ms** (~{align_s} s).\n\n\
+         For each AI suggestion:\n\
+         - title, imagePrompt, overlayText (optional), transcriptExcerpt, startMs, endMs, idealDisplayMs (required, ≤ {max_display} ms), bibleStory (optional), rationale.\n\n\
+         Do NOT suggest AI images for asset-file moments (intro/outro/trigger clips). Those belong in assetReviews only.",
         master = OVERLAY_MASTER_PROMPT,
-        show = settings.show_context
+        show = settings.show_context,
+        asset_context = asset_context,
+        video_duration_ms = video_duration_ms,
+        slice_ms = MAX_LLM_SEGMENT_SLICE_MS,
+        align_ms = MAX_TRANSCRIPT_ALIGN_MS,
+        align_s = MAX_TRANSCRIPT_ALIGN_MS / 1000,
+        max_display = MAX_IDEAL_DISPLAY_MS,
     );
 
     let sliced = sentence_slices_for_llm(&transcript.segments);
@@ -253,10 +404,15 @@ pub async fn analyze_transcript_for_overlays(
     }
 
     let user_prompt = format!(
-        "Full transcript (reference only):\n\n{}\n\n---\nTimestamped sentence slices (authoritative timings for startMs/endMs):\n{}\n\n\
-         Analyze this episode using the master brief AND the TIMESTAMPED CONTEXT rules above. Return bibleStories and suggestions only \
-         for meaningful visual storytelling moments; skip prayers, sign-offs, CTAs, sponsors, and filler per the rules.",
-        transcript.full_text, segments_text
+        "Video file duration: {video_duration_ms} ms\n\n\
+         Full transcript (reference only):\n\n{full}\n\n---\n\
+         Timestamped sentence slices (authoritative timings for startMs/endMs and contentBounds):\n{segments}\n\n---\n\
+         Proposed asset triggers (verify each in assetReviews; timestamps from transcript word search):\n{proposed}\n\n\
+         Analyze this episode. Return contentBounds, assetReviews, bibleStories, and AI image suggestions only \
+         for meaningful visual storytelling moments not covered by verified assets.",
+        full = transcript.full_text,
+        segments = segments_text,
+        proposed = proposed_json,
     );
 
     let body = json!({
@@ -305,10 +461,25 @@ pub async fn analyze_transcript_for_overlays(
     let payload: OpenAiAnalysisPayload = serde_json::from_str(&json_text)
         .map_err(|e| format!("openai_parse_analysis_json:{}:{}", e, json_text))?;
 
+    let asset_placements = merge_asset_placements(&proposed_triggers, &payload.asset_reviews);
+    let asset_names: Vec<String> = asset_placements
+        .iter()
+        .map(|a| a.asset_file_name.to_lowercase())
+        .collect();
+
     let suggestions: Vec<OverlaySuggestion> = payload
         .suggestions
         .into_iter()
         .filter(|s| !s.title.trim().is_empty() && !s.image_prompt.trim().is_empty())
+        .filter(|s| {
+            let blob = format!(
+                "{} {} {}",
+                s.title.to_lowercase(),
+                s.rationale.to_lowercase(),
+                s.transcript_excerpt.to_lowercase()
+            );
+            !asset_names.iter().any(|name| blob.contains(name))
+        })
         .map(|s| {
             let (start_ms, end_ms, ideal_display_ms) =
                 normalize_overlay_timing(s.start_ms, s.end_ms, s.ideal_display_ms);
@@ -316,16 +487,35 @@ pub async fn analyze_transcript_for_overlays(
                 id: Uuid::new_v4().to_string(),
                 title: s.title.trim().to_string(),
                 image_prompt: s.image_prompt.trim().to_string(),
-                overlay_text: s.overlay_text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                overlay_text: s
+                    .overlay_text
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
                 transcript_excerpt: s.transcript_excerpt.trim().to_string(),
                 start_ms,
                 end_ms,
                 ideal_display_ms,
-                bible_story: s.bible_story.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                bible_story: s
+                    .bible_story
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
                 rationale: s.rationale.trim().to_string(),
             }
         })
         .collect();
+
+    let content_bounds = payload.content_bounds.map(|b| {
+        let start = b.content_start_ms.min(video_duration_ms);
+        let end = b
+            .content_end_ms
+            .clamp(start.saturating_add(500), video_duration_ms);
+        EpisodeContentBounds {
+            content_start_ms: start,
+            content_end_ms: end,
+            video_duration_ms: Some(video_duration_ms),
+            rationale: b.rationale.trim().to_string(),
+        }
+    });
 
     Ok(TranscriptAnalysis {
         video_id: transcript.video_id.clone(),
@@ -333,6 +523,8 @@ pub async fn analyze_transcript_for_overlays(
         suggestions,
         analyzed_at: Utc::now().to_rfc3339(),
         model,
+        content_bounds,
+        asset_placements,
     })
 }
 
@@ -364,7 +556,7 @@ pub async fn generate_overlay_image_prompt(
     );
 
     let body = json!({
-        "model": settings.openai_text_model,
+        "model": resolve_openai_text_model(settings),
         "input": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt }

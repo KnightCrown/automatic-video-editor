@@ -5,13 +5,12 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Command as TokioCommand;
 
 use crate::types::PipelineProgress;
-
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"];
+use crate::video::extensions::is_video_file_extension;
 
 pub fn is_video_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|ext| VIDEO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .map(is_video_file_extension)
         .unwrap_or(false)
 }
 
@@ -167,10 +166,7 @@ pub async fn extract_audio_for_transcription(
     };
     let input = PathBuf::from(&video_path);
     if !input.is_file() {
-        return Err(format!(
-            "Video file not found: {}",
-            input.display()
-        ));
+        return Err(format!("Video file not found: {}", input.display()));
     }
     let output = PathBuf::from(&output_wav);
     if let Some(parent) = output.parent() {
@@ -187,7 +183,8 @@ pub async fn extract_audio_for_transcription(
             percent: 5.0,
             message: Some(format!(
                 "Extracting audio with FFmpeg ({})…",
-                ffmpeg.file_name()
+                ffmpeg
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("ffmpeg")
             )),

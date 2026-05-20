@@ -46,10 +46,7 @@ pub async fn run_transcription_pipeline(
                     job_id: job_id.clone(),
                     stage: "skipped".to_string(),
                     percent: 100.0,
-                    message: Some(format!(
-                        "Already transcribed — {}",
-                        video.file_name
-                    )),
+                    message: Some(format!("Already transcribed — {}", video.file_name)),
                     episode_index: None,
                     episode_total: Some(episode_total),
                 },
@@ -80,14 +77,8 @@ pub async fn run_transcription_pipeline(
             },
         );
 
-        let result = process_single_video(
-            app.clone(),
-            &project_root,
-            &video,
-            job_id,
-            Some(batch),
-        )
-        .await;
+        let result =
+            process_single_video(app.clone(), &project_root, &video, job_id, Some(batch)).await;
 
         match result {
             Ok(()) => {
@@ -129,10 +120,7 @@ pub async fn process_single_video(
                 job_id: job_id.clone(),
                 stage: "done".to_string(),
                 percent: 100.0,
-                message: Some(format!(
-                    "Using saved transcript for {}",
-                    video.file_name
-                )),
+                message: Some(format!("Using saved transcript for {}", video.file_name)),
                 episode_index,
                 episode_total,
             },
@@ -178,19 +166,17 @@ pub async fn process_single_video(
         },
     );
 
-    let transcript =
-        transcribe_wav(
-            &app,
-            &job_id,
-            &wav_path,
-            &video.id,
-            &video.path,
-            transcript_timing_offset_ms,
-            batch,
-        )
-            .map_err(|e| format!("[Speech recognition] {e}"))?;
-    save_transcript(&paths, &transcript)
-        .map_err(|e| format!("[Save transcript] {e}"))?;
+    let transcript = transcribe_wav(
+        &app,
+        &job_id,
+        &wav_path,
+        &video.id,
+        &video.path,
+        transcript_timing_offset_ms,
+        batch,
+    )
+    .map_err(|e| format!("[Speech recognition] {e}"))?;
+    save_transcript(&paths, &transcript).map_err(|e| format!("[Save transcript] {e}"))?;
 
     let _ = generate_and_save_waveform_from_transcription_wav(
         project_root,

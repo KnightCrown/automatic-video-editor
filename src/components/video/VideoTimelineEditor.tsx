@@ -7,7 +7,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { Eye, Film, Music2, Plus, Scissors, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { Eye, Film, Music2, Plus, Scissors, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import type { AudioWaveform, TimelineVideoClip, VideoOverlayClip } from "../../types/pipeline";
 import { formatTimeMs } from "../../utils/overlayClips";
 import { videoClipEndMs } from "../../utils/timelineVideoClips";
@@ -21,11 +21,19 @@ export type TimelineEditorSelection =
   | { kind: "video"; id: string };
 
 type DragMode =
-  | { kind: "move"; target: TimelineEditorSelection; startX: number; origStartMs: number }
+  | {
+      kind: "move";
+      target: TimelineEditorSelection;
+      startX: number;
+      startY: number;
+      origStartMs: number;
+      origTrackIndex?: number;
+    }
   | {
       kind: "resize-left";
       target: TimelineEditorSelection;
       startX: number;
+      startY: number;
       origStartMs: number;
       origDurationMs: number;
       origTrimStartMs?: number;
@@ -34,6 +42,7 @@ type DragMode =
       kind: "resize-right";
       target: TimelineEditorSelection;
       startX: number;
+      startY: number;
       origStartMs: number;
       origDurationMs: number;
     }
@@ -57,6 +66,8 @@ type Props = {
   onPxPerMsChange: (px: number) => void;
   onAddTrack: () => void;
   onAddMedia: () => void;
+  onAddAiOverlay: () => void;
+  addingAiOverlay?: boolean;
   fitToWidth?: boolean;
 };
 
@@ -116,12 +127,36 @@ export function VideoTimelineEditor({
   onPxPerMsChange,
   onAddTrack,
   onAddMedia,
+  onAddAiOverlay,
+  addingAiOverlay = false,
   fitToWidth = false,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+  const trackRowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [trackAreaWidth, setTrackAreaWidth] = useState(640);
   const [drag, setDrag] = useState<DragMode | null>(null);
+
+  const trackIndexAtY = useCallback((clientY: number): number | null => {
+    let closest: { index: number; distance: number } | null = null;
+    for (const [index, el] of trackRowRefs.current.entries()) {
+      const rect = el.getBoundingClientRect();
+      if (clientY >= rect.top && clientY <= rect.bottom) {
+        return index;
+      }
+      const mid = (rect.top + rect.bottom) / 2;
+      const distance = Math.abs(clientY - mid);
+      if (!closest || distance < closest.distance) {
+        closest = { index, distance };
+      }
+    }
+    return closest?.index ?? null;
+  }, []);
+
+  const setTrackRowRef = useCallback((trackIndex: number, el: HTMLDivElement | null) => {
+    if (el) trackRowRefs.current.set(trackIndex, el);
+    else trackRowRefs.current.delete(trackIndex);
+  }, []);
 
   useLayoutEffect(() => {
     const el = trackAreaRef.current;
@@ -243,7 +278,12 @@ export function VideoTimelineEditor({
           Math.min(durationMs - clip.durationMs, drag.origStartMs + pxToMs(dx)),
         );
         start = snapMs(start, currentMs);
-        updateVideoClip(drag.target.id, { startMs: start });
+        const patch: Partial<TimelineVideoClip> = { startMs: start };
+        const targetTrack = trackIndexAtY(e.clientY);
+        if (targetTrack !== null && targetTrack !== clip.trackIndex) {
+          patch.trackIndex = targetTrack;
+        }
+        updateVideoClip(drag.target.id, patch);
       } else if (drag.kind === "resize-left") {
         const delta = pxToMs(dx);
         let start = Math.max(0, drag.origStartMs + delta);
@@ -291,6 +331,7 @@ export function VideoTimelineEditor({
     updateOverlayClip,
     updateVideoClip,
     videoClips,
+    trackIndexAtY,
   ]);
 
   const deleteSelected = useCallback(() => {
@@ -363,7 +404,9 @@ export function VideoTimelineEditor({
             kind: "move",
             target,
             startX: e.clientX,
+            startY: e.clientY,
             origStartMs: clip.startMs,
+            origTrackIndex: clip.trackIndex,
           });
         }}
       >
@@ -376,6 +419,7 @@ export function VideoTimelineEditor({
               kind: "resize-left",
               target,
               startX: e.clientX,
+              startY: e.clientY,
               origStartMs: clip.startMs,
               origDurationMs: clip.durationMs,
               origTrimStartMs: clip.trimStartMs ?? 0,
@@ -392,6 +436,7 @@ export function VideoTimelineEditor({
               kind: "resize-right",
               target,
               startX: e.clientX,
+              startY: e.clientY,
               origStartMs: clip.startMs,
               origDurationMs: clip.durationMs,
             });
@@ -452,6 +497,15 @@ export function VideoTimelineEditor({
             <Plus size={15} />
             Add media
           </button>
+          <button
+            type="button"
+            className="video-timeline-action-button ai-overlay"
+            onClick={onAddAiOverlay}
+            disabled={addingAiOverlay}
+          >
+            <Sparkles size={15} />
+            {addingAiOverlay ? "Generating…" : "Add AI overlay"}
+          </button>
         </div>
         <span className="video-timeline-playhead-label">
           Playhead {formatTimeMs(currentMs)}
@@ -497,6 +551,7 @@ export function VideoTimelineEditor({
                 <div
                   className="video-timeline-track-area video extra"
                   style={{ width: timelineWidth }}
+                  ref={(el) => setTrackRowRef(trackIndex, el)}
                   onMouseDown={seekFromTrackClick}
                 >
                   {videoClips
@@ -543,6 +598,7 @@ export function VideoTimelineEditor({
                           kind: "move",
                           target,
                           startX: e.clientX,
+                          startY: e.clientY,
                           origStartMs: clip.startMs,
                         });
                       }}
@@ -556,6 +612,7 @@ export function VideoTimelineEditor({
                             kind: "resize-left",
                             target,
                             startX: e.clientX,
+                            startY: e.clientY,
                             origStartMs: clip.startMs,
                             origDurationMs: clip.durationMs,
                           });
@@ -579,6 +636,7 @@ export function VideoTimelineEditor({
                             kind: "resize-right",
                             target,
                             startX: e.clientX,
+                            startY: e.clientY,
                             origStartMs: clip.startMs,
                             origDurationMs: clip.durationMs,
                           });

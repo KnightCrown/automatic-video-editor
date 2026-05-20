@@ -6,7 +6,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::asr::model_download::{missing_parakeet_files, model_dir};
 use crate::audio::ffmpeg::probe_av_stream_start_times;
-use crate::types::{PipelineProgress, Transcript, TranscriptSegment, TranscriptWord};
+use crate::pipeline::word_timing::build_interpolated_words;
+use crate::types::{PipelineProgress, Transcript, TranscriptSegment};
 
 const TRANSCRIBE_PROGRESS_START: f64 = 40.0;
 const TRANSCRIBE_PROGRESS_END: f64 = 95.0;
@@ -180,12 +181,7 @@ fn transcribe_chunks(
         let offset_secs = sample_offset as f64 / sample_rate as f64;
 
         let result = model
-            .transcribe_samples(
-                chunk,
-                sample_rate,
-                1,
-                Some(TimestampMode::Sentences),
-            )
+            .transcribe_samples(chunk, sample_rate, 1, Some(TimestampMode::Sentences))
             .map_err(|e| {
                 let duration_mins = audio.len() as f64 / sample_rate as f64 / 60.0;
                 format!(
@@ -262,12 +258,7 @@ pub fn transcribe_wav(
             batch,
         );
         let result = model
-            .transcribe_samples(
-                audio,
-                sample_rate,
-                1,
-                Some(TimestampMode::Sentences),
-            )
+            .transcribe_samples(audio, sample_rate, 1, Some(TimestampMode::Sentences))
             .map_err(|e| {
                 format!(
                     "Parakeet transcription failed ({:.1}s audio): {e}",
@@ -288,16 +279,16 @@ pub fn transcribe_wav(
         (result.text, segments)
     };
 
-    let words: Vec<TranscriptWord> = segments
-        .iter()
-        .flat_map(|seg| {
-            seg.text.split_whitespace().map(|w| TranscriptWord {
-                start_ms: seg.start_ms,
-                end_ms: seg.end_ms,
-                text: w.to_string(),
-            })
-        })
-        .collect();
+    let words = build_interpolated_words(&Transcript {
+        video_id: video_id.to_string(),
+        video_path: video_path.to_string(),
+        full_text: full_text.clone(),
+        segments: segments.clone(),
+        words: None,
+        probed_video_stream_start_sec: None,
+        probed_audio_stream_start_sec: None,
+        applied_transcript_timing_offset_ms: None,
+    });
 
     let (probed_video, probed_audio) = probe_av_stream_start_times(video_path);
 

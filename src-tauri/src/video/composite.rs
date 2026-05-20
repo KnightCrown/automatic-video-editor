@@ -72,6 +72,311 @@ fn ms_to_sec(ms: u64) -> f64 {
     ms as f64 / 1000.0
 }
 
+fn is_insert_video_clip(clip: &TimelineVideoClip) -> bool {
+    clip.timeline_mode == "insert"
+        || matches!(clip.placement_kind.as_deref(), Some("intro" | "outro"))
+}
+
+fn shift_clips_for_content_window(
+    clips: &mut Vec<VideoOverlayClip>,
+    video_clips: &mut Vec<TimelineVideoClip>,
+    content_start_ms: u64,
+    content_end_ms: u64,
+) {
+    if content_end_ms <= content_start_ms {
+        return;
+    }
+    clips.retain_mut(|c| {
+        if c.start_ms >= content_end_ms
+            || c.start_ms.saturating_add(c.duration_ms) <= content_start_ms
+        {
+            return false;
+        }
+        c.start_ms = c.start_ms.saturating_sub(content_start_ms);
+        true
+    });
+    video_clips.retain_mut(|c| {
+        if is_insert_video_clip(c) {
+            return true;
+        }
+        if c.start_ms >= content_end_ms
+            || c.start_ms.saturating_add(c.duration_ms) <= content_start_ms
+        {
+            return false;
+        }
+        c.start_ms = c.start_ms.saturating_sub(content_start_ms);
+        true
+    });
+}
+
+#[derive(Clone, Debug)]
+struct InsertTimelineOffset {
+    insert_at_ms: u64,
+    duration_ms: u64,
+}
+
+fn effective_video_clip_duration_ms(clip: &TimelineVideoClip) -> u64 {
+    let trim_start = clip.trim_start_ms.unwrap_or(0).min(clip.source_duration_ms);
+    let available = clip.source_duration_ms.saturating_sub(trim_start);
+    clip.duration_ms.min(available).max(1)
+}
+
+fn normalized_insert_at_ms(
+    clip: &TimelineVideoClip,
+    content_start_ms: u64,
+    content_end_ms: u64,
+) -> u64 {
+    if matches!(clip.placement_kind.as_deref(), Some("intro")) || clip.start_ms <= content_start_ms
+    {
+        return content_start_ms;
+    }
+    if matches!(clip.placement_kind.as_deref(), Some("outro")) || clip.start_ms >= content_end_ms {
+        return content_end_ms;
+    }
+    clip.start_ms.clamp(content_start_ms, content_end_ms)
+}
+
+fn output_time_for_episode_ms(
+    episode_ms: u64,
+    content_start_ms: u64,
+    offsets: &[InsertTimelineOffset],
+) -> u64 {
+    let mut out = episode_ms.saturating_sub(content_start_ms);
+    for offset in offsets {
+        if offset.insert_at_ms <= episode_ms {
+            out = out.saturating_add(offset.duration_ms);
+        }
+    }
+    out
+}
+
+fn shift_clips_for_inserted_timeline(
+    clips: &mut Vec<VideoOverlayClip>,
+    video_clips: &mut Vec<TimelineVideoClip>,
+    content_start_ms: u64,
+    content_end_ms: u64,
+    offsets: &[InsertTimelineOffset],
+) {
+    clips.retain_mut(|c| {
+        if c.start_ms >= content_end_ms
+            || c.start_ms.saturating_add(c.duration_ms) <= content_start_ms
+        {
+            return false;
+        }
+        c.start_ms =
+            output_time_for_episode_ms(c.start_ms.max(content_start_ms), content_start_ms, offsets);
+        true
+    });
+    video_clips.retain_mut(|c| {
+        if is_insert_video_clip(c) {
+            return false;
+        }
+        if c.start_ms >= content_end_ms
+            || c.start_ms.saturating_add(c.duration_ms) <= content_start_ms
+        {
+            return false;
+        }
+        c.start_ms =
+            output_time_for_episode_ms(c.start_ms.max(content_start_ms), content_start_ms, offsets);
+        true
+    });
+}
+
+fn normalized_segment_filter(video_w: u32, video_h: u32) -> String {
+    format!(
+        "scale={video_w}:{video_h}:force_original_aspect_ratio=decrease,pad={video_w}:{video_h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+    )
+}
+
+fn run_ffmpeg_blocking(ffmpeg: &Path, args: &[String], context: &str) -> Result<(), String> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{context}_spawn_failed:{e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{context}_failed:{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn render_normalized_segment(
+    ffmpeg: &Path,
+    source: &Path,
+    output: &Path,
+    start_ms: u64,
+    duration_ms: u64,
+    video_w: u32,
+    video_h: u32,
+) -> Result<(), String> {
+    let filter = normalized_segment_filter(video_w, video_h);
+    let args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-y".to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", ms_to_sec(start_ms)),
+        "-t".to_string(),
+        format!("{:.3}", ms_to_sec(duration_ms).max(0.001)),
+        "-i".to_string(),
+        source.to_string_lossy().into_owned(),
+        "-vf".to_string(),
+        filter,
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "-preset".to_string(),
+        "veryfast".to_string(),
+        "-crf".to_string(),
+        "20".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "192k".to_string(),
+        "-ar".to_string(),
+        "48000".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        output.to_string_lossy().into_owned(),
+    ];
+    run_ffmpeg_blocking(ffmpeg, &args, "render_insert_segment")
+}
+
+fn concat_list_line(path: &Path) -> String {
+    let escaped = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "'\\''");
+    format!("file '{escaped}'\n")
+}
+
+fn render_concatenated_base_with_inserts(
+    ffmpeg: &Path,
+    base_video_path: &str,
+    insert_clips: &[(TimelineVideoClip, PathBuf)],
+    content_start_ms: u64,
+    content_end_ms: u64,
+    video_w: u32,
+    video_h: u32,
+    video_id: &str,
+) -> Result<(PathBuf, Vec<InsertTimelineOffset>), String> {
+    let temp_dir = std::env::temp_dir().join("devotiontime").join(video_id);
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("create_temp_dir_failed:{e}"))?;
+
+    let base_path = Path::new(base_video_path);
+    let mut inserts: Vec<(u64, TimelineVideoClip, PathBuf)> = insert_clips
+        .iter()
+        .map(|(clip, path)| {
+            (
+                normalized_insert_at_ms(clip, content_start_ms, content_end_ms),
+                clip.clone(),
+                path.clone(),
+            )
+        })
+        .collect();
+    inserts.sort_by_key(|(insert_at, clip, _)| {
+        let kind_rank = match clip.placement_kind.as_deref() {
+            Some("intro") => 0,
+            Some("outro") => 2,
+            _ => 1,
+        };
+        (*insert_at, kind_rank, clip.track_index)
+    });
+
+    let mut segment_paths = Vec::new();
+    let mut offsets = Vec::new();
+    let mut cursor = content_start_ms;
+    let mut index = 0usize;
+
+    for (insert_at, clip, path) in inserts {
+        if insert_at > cursor {
+            let duration = insert_at.saturating_sub(cursor);
+            let segment = temp_dir.join(format!("segment-{index:03}-base.mp4"));
+            render_normalized_segment(
+                ffmpeg, base_path, &segment, cursor, duration, video_w, video_h,
+            )?;
+            segment_paths.push(segment);
+            index += 1;
+            cursor = insert_at;
+        }
+
+        let duration = effective_video_clip_duration_ms(&clip);
+        let segment = temp_dir.join(format!("segment-{index:03}-insert.mp4"));
+        render_normalized_segment(
+            ffmpeg,
+            &path,
+            &segment,
+            clip.trim_start_ms.unwrap_or(0),
+            duration,
+            video_w,
+            video_h,
+        )?;
+        segment_paths.push(segment);
+        offsets.push(InsertTimelineOffset {
+            insert_at_ms: insert_at,
+            duration_ms: duration,
+        });
+        index += 1;
+    }
+
+    if content_end_ms > cursor {
+        let duration = content_end_ms.saturating_sub(cursor);
+        let segment = temp_dir.join(format!("segment-{index:03}-base.mp4"));
+        render_normalized_segment(
+            ffmpeg, base_path, &segment, cursor, duration, video_w, video_h,
+        )?;
+        segment_paths.push(segment);
+    }
+
+    if segment_paths.is_empty() {
+        return Err("insert_concat_no_segments".to_string());
+    }
+
+    let list_path = temp_dir.join("concat-list.txt");
+    let list_body = segment_paths
+        .iter()
+        .map(|p| concat_list_line(p))
+        .collect::<String>();
+    std::fs::write(&list_path, list_body).map_err(|e| format!("write_concat_list_failed:{e}"))?;
+
+    let output = temp_dir.join("base-with-inserts.mp4");
+    let args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-y".to_string(),
+        "-f".to_string(),
+        "concat".to_string(),
+        "-safe".to_string(),
+        "0".to_string(),
+        "-i".to_string(),
+        list_path.to_string_lossy().into_owned(),
+        "-c".to_string(),
+        "copy".to_string(),
+        output.to_string_lossy().into_owned(),
+    ];
+    run_ffmpeg_blocking(ffmpeg, &args, "concat_insert_segments")?;
+
+    Ok((output, offsets))
+}
+
+fn push_base_video_input(args: &mut Vec<String>, video_path: &str, trim: Option<(f64, f64)>) {
+    if let Some((start, end)) = trim {
+        args.push("-ss".into());
+        args.push(format!("{start:.3}"));
+        args.push("-to".into());
+        args.push(format!("{end:.3}"));
+    }
+    args.push("-i".into());
+    args.push(video_path.to_string());
+}
+
 fn clip_opacity_alpha(clip: &VideoOverlayClip) -> f64 {
     (clip.opacity_pct.unwrap_or(100.0) / 100.0).clamp(0.0, 1.0)
 }
@@ -139,10 +444,8 @@ fn build_cpu_filter_complex_on_base(
         let start = ms_to_sec(clip.start_ms);
         let end = ms_to_sec(clip.start_ms.saturating_add(clip.duration_ms));
         let overlay_w = ((video_w as f64) * (clip.layout.width_pct / 100.0)).round() as u32;
-        let margin_x =
-            ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
-        let margin_y =
-            ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
+        let margin_x = ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
+        let margin_y = ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
         let x_expr = overlay_x_expr(clip, margin_x);
 
         filter_parts.push(overlay_input_filter(
@@ -210,7 +513,10 @@ fn build_extra_video_video_chain(
         let (overlay_x, overlay_y) = if scale_pct >= 99.5 {
             ("0".to_string(), "0".to_string())
         } else {
-            ("(main_w-overlay_w)/2".to_string(), "(main_h-overlay_h)/2".to_string())
+            (
+                "(main_w-overlay_w)/2".to_string(),
+                "(main_h-overlay_h)/2".to_string(),
+            )
         };
 
         if scale_pct >= 99.5 {
@@ -304,10 +610,8 @@ fn build_cuda_filter_complex(clips: &[VideoOverlayClip], video_w: u32, video_h: 
         let start = ms_to_sec(clip.start_ms);
         let end = ms_to_sec(clip.start_ms.saturating_add(clip.duration_ms));
         let overlay_w = ((video_w as f64) * (clip.layout.width_pct / 100.0)).round() as u32;
-        let margin_x =
-            ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
-        let margin_y =
-            ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
+        let margin_x = ((video_w as f64) * (clip.layout.margin_x_pct / 100.0)).round() as i32;
+        let margin_y = ((video_h as f64) * (clip.layout.margin_y_pct / 100.0)).round() as i32;
         let x_expr = overlay_x_expr(clip, margin_x);
 
         parts.push(overlay_input_filter(
@@ -385,9 +689,13 @@ fn build_export_runs(
     encoder: VideoExportEncoderKind,
     preflight: &crate::types::VideoExportPreflight,
     audio_copy: bool,
+    content_trim: Option<(f64, f64)>,
 ) -> Vec<ExportRun> {
     let fast = settings.video_export_quality == "fast";
-    let duration_sec = probe_video_duration_sec(video_path).unwrap_or(1.0).max(0.1);
+    let duration_sec = match content_trim {
+        Some((start, end)) => (end - start).max(0.1),
+        None => probe_video_duration_sec(video_path).unwrap_or(1.0).max(0.1),
+    };
     let mode = settings.video_export_mode.as_str();
     let mut runs: Vec<ExportRun> = Vec::new();
     let overlay_input_start = 1usize;
@@ -413,16 +721,18 @@ fn build_export_runs(
             "cuda".into(),
             "-hwaccel_output_format".into(),
             "cuda".into(),
-            "-i".into(),
-            video_path.to_string(),
         ];
+        push_base_video_input(&mut args, video_path, content_trim);
         push_overlay_inputs(&mut args, image_paths);
         args.push("-filter_complex".into());
         args.push(build_cuda_filter_complex(clips, video_w, video_h));
         args.push("-map".into());
         args.push("[vout]".into());
         args.extend(audio_args(audio_copy));
-        args.extend(build_video_encoder_args(VideoExportEncoderKind::Nvenc, fast));
+        args.extend(build_video_encoder_args(
+            VideoExportEncoderKind::Nvenc,
+            fast,
+        ));
         args.push("-shortest".into());
         args.push(output_path.to_string());
 
@@ -436,7 +746,8 @@ fn build_export_runs(
 
     if try_hw_paths {
         if let Some(hw) = hw_encoder {
-            let mut args = vec!["-y".into(), "-i".into(), video_path.to_string()];
+            let mut args = vec!["-y".into()];
+            push_base_video_input(&mut args, video_path, content_trim);
             push_overlay_inputs(&mut args, image_paths);
             push_video_clip_inputs(&mut args, extra_video_paths);
             if !use_filters {
@@ -472,13 +783,17 @@ fn build_export_runs(
         }
     }
 
-    let mut args = vec!["-y".into(), "-i".into(), video_path.to_string()];
+    let mut args = vec!["-y".into()];
+    push_base_video_input(&mut args, video_path, content_trim);
     push_overlay_inputs(&mut args, image_paths);
     push_video_clip_inputs(&mut args, extra_video_paths);
     if !use_filters {
         args.push("-map".into());
         args.push("0:v".into());
-        args.extend(build_video_encoder_args(VideoExportEncoderKind::Software, fast));
+        args.extend(build_video_encoder_args(
+            VideoExportEncoderKind::Software,
+            fast,
+        ));
         args.extend(audio_args(audio_copy));
         args.push(output_path.to_string());
     } else {
@@ -495,7 +810,10 @@ fn build_export_runs(
         args.push("-map".into());
         args.push("[vout]".into());
         args.extend(audio_args(audio_copy));
-        args.extend(build_video_encoder_args(VideoExportEncoderKind::Software, fast));
+        args.extend(build_video_encoder_args(
+            VideoExportEncoderKind::Software,
+            fast,
+        ));
         args.push("-shortest".into());
         args.push(output_path.to_string());
     }
@@ -521,10 +839,7 @@ fn parse_hms_time_token(token: &str) -> Option<f64> {
 fn parse_ffmpeg_progress_sec(fragment: &str) -> Option<f64> {
     if let Some(idx) = fragment.find("out_time_ms=") {
         let rest = &fragment[idx + 12..];
-        let num: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         return num.parse::<u64>().ok().map(|ms| ms as f64 / 1_000_000.0);
     }
     let idx = fragment.find("time=")?;
@@ -672,6 +987,8 @@ pub async fn export_video_with_overlays(
     output_path: String,
     clips: Vec<VideoOverlayClip>,
     video_clips: Vec<TimelineVideoClip>,
+    content_start_ms: Option<u64>,
+    content_end_ms: Option<u64>,
 ) -> Result<String, String> {
     let emit = |stage: &str, percent: f32, message: Option<String>| {
         let _ = app.emit(
@@ -687,8 +1004,14 @@ pub async fn export_video_with_overlays(
 
     controller.begin(&video_id).await;
 
+    let mut clips = clips;
     let mut video_clips = video_clips;
     video_clips.sort_by_key(|c| c.track_index);
+
+    let content_window_ms = match (content_start_ms, content_end_ms) {
+        (Some(start), Some(end)) if end > start => Some((start, end)),
+        _ => None,
+    };
 
     let export_result = async {
         emit("prepare", 0.0, Some("Preparing export…".to_string()));
@@ -700,16 +1023,96 @@ pub async fn export_video_with_overlays(
 
         emit("prepare", 1.0, Some("Reading video info…".to_string()));
         let (video_w, video_h) = probe_video_dimensions(&video_path)?;
+        let original_duration_ms = probe_video_duration_sec(&video_path)
+            .map(|s| (s * 1000.0).round().max(1.0) as u64)
+            .unwrap_or_else(|_| {
+                clips
+                    .iter()
+                    .map(|c| c.start_ms.saturating_add(c.duration_ms))
+                    .chain(
+                        video_clips
+                            .iter()
+                            .map(|c| c.start_ms.saturating_add(c.duration_ms)),
+                    )
+                    .max()
+                    .unwrap_or(1)
+            });
+        let mut export_video_path = video_path.clone();
+        let mut content_trim =
+            content_window_ms.map(|(start, end)| (ms_to_sec(start), ms_to_sec(end)));
 
-        emit("prepare", 2.0, Some("Detecting encoders (first run may take a moment)…".to_string()));
+        emit(
+            "prepare",
+            2.0,
+            Some("Detecting encoders (first run may take a moment)…".to_string()),
+        );
         let preflight = tokio::task::spawn_blocking(discover_video_export_capabilities)
             .await
             .map_err(|e| format!("preflight_task_failed:{e}"))?;
 
         let encoder = resolve_encoder_for_export(&settings, &preflight);
-        let audio_copy = probe_audio_copy_safe(&video_path);
+        let ffmpeg = resolve_ffmpeg_executable()?;
 
-        emit("prepare", 4.0, Some("Resolving overlay images…".to_string()));
+        let mut insert_video_clips: Vec<(TimelineVideoClip, PathBuf)> = Vec::new();
+        let mut overlay_video_clips: Vec<TimelineVideoClip> = Vec::new();
+        for clip in video_clips {
+            let abs = resolve_timeline_media_absolute(&root_path, &clip.source_relative_path)?;
+            if !abs.is_file() {
+                return Err(format!("Timeline video not found: {}", clip.file_name));
+            }
+            if is_insert_video_clip(&clip) {
+                insert_video_clips.push((clip, abs));
+            } else {
+                overlay_video_clips.push(clip);
+            }
+        }
+
+        if !insert_video_clips.is_empty() {
+            let (content_start, content_end) =
+                content_window_ms.unwrap_or((0, original_duration_ms));
+            let content_end = content_end.min(original_duration_ms).max(content_start);
+            emit(
+                "prepare",
+                3.0,
+                Some("Building inserted asset sequence…".to_string()),
+            );
+            let (concatenated, offsets) = render_concatenated_base_with_inserts(
+                &ffmpeg,
+                &video_path,
+                &insert_video_clips,
+                content_start,
+                content_end,
+                video_w,
+                video_h,
+                &video_id,
+            )?;
+            shift_clips_for_inserted_timeline(
+                &mut clips,
+                &mut overlay_video_clips,
+                content_start,
+                content_end,
+                &offsets,
+            );
+            export_video_path = concatenated.to_string_lossy().into_owned();
+            content_trim = None;
+        } else if let Some((content_start, content_end)) = content_window_ms {
+            let content_end = content_end.min(original_duration_ms).max(content_start);
+            shift_clips_for_content_window(
+                &mut clips,
+                &mut overlay_video_clips,
+                content_start,
+                content_end,
+            );
+            content_trim = Some((ms_to_sec(content_start), ms_to_sec(content_end)));
+        }
+
+        let audio_copy = probe_audio_copy_safe(&export_video_path);
+
+        emit(
+            "prepare",
+            4.0,
+            Some("Resolving overlay images…".to_string()),
+        );
         let mut image_abs_paths: Vec<PathBuf> = Vec::new();
         for clip in &clips {
             let abs = resolve_project_image_absolute_path(&root_path, &clip.image_relative_path)?;
@@ -717,13 +1120,10 @@ pub async fn export_video_with_overlays(
         }
 
         let mut extra_video_paths: Vec<PathBuf> = Vec::new();
-        for clip in &video_clips {
+        for clip in &overlay_video_clips {
             let abs = resolve_timeline_media_absolute(&root_path, &clip.source_relative_path)?;
             if !abs.is_file() {
-                return Err(format!(
-                    "Timeline video not found: {}",
-                    clip.file_name
-                ));
+                return Err(format!("Timeline video not found: {}", clip.file_name));
             }
             extra_video_paths.push(abs);
         }
@@ -746,11 +1146,11 @@ pub async fn export_video_with_overlays(
         );
 
         let runs = build_export_runs(
-            &video_path,
+            &export_video_path,
             &image_abs_paths,
             &extra_video_paths,
             &clips,
-            &video_clips,
+            &overlay_video_clips,
             video_w,
             video_h,
             &output_path,
@@ -758,6 +1158,7 @@ pub async fn export_video_with_overlays(
             encoder,
             &preflight,
             audio_copy,
+            content_trim,
         );
 
         let mut last_err: Option<String> = None;
@@ -795,11 +1196,7 @@ pub async fn export_video_with_overlays(
     .await;
 
     if controller.is_cancelled(&video_id).await {
-        emit(
-            "cancelled",
-            0.0,
-            Some("Export cancelled.".to_string()),
-        );
+        emit("cancelled", 0.0, Some("Export cancelled.".to_string()));
         controller.end(&video_id).await;
         return Err(VideoExportController::cancelled_error());
     }

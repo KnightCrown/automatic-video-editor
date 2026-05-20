@@ -56,8 +56,8 @@ impl ImageProvider for OpenAiImageProvider {
             return Err(format!("openai_image_error:{}:{}", status, body_text));
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&body_text)
-            .map_err(|e| format!("openai_image_parse:{}", e))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body_text).map_err(|e| format!("openai_image_parse:{}", e))?;
 
         if let Some(b64) = parsed
             .get("data")

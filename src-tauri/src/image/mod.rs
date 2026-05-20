@@ -1,5 +1,6 @@
 pub mod openai;
 pub mod overlay_images;
+pub mod playhead_overlay;
 pub mod provider;
 pub mod xai_imagine;
 

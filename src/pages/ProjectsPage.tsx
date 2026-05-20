@@ -8,6 +8,7 @@ import { formatTranscriptionError } from "../utils/transcriptionErrors";
 export function ProjectsPage() {
   const { project, setProject } = useProject();
   const [loading, setLoading] = useState(false);
+  const [scanProgress, setScanProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -28,13 +29,17 @@ export function ProjectsPage() {
     if (!selected || typeof selected !== "string") return;
 
     setLoading(true);
+    setScanProgress("Scanning folder for video files…");
     try {
-      const manifest = await openProject(selected);
+      const manifest = await openProject(selected, (progress) => {
+        setScanProgress(progress.message ?? progress.fileName ?? "Scanning…");
+      });
       setProject(manifest);
     } catch (err) {
       setError(String(err));
     } finally {
       setLoading(false);
+      setScanProgress(null);
     }
   }
 
@@ -49,6 +54,7 @@ export function ProjectsPage() {
         <button type="button" className="btn primary" onClick={pickFolder} disabled={loading}>
           {loading ? "Opening…" : "Open video folder"}
         </button>
+        {scanProgress ? <p className="muted">{scanProgress}</p> : null}
         {project && (
           <>
             <Link to="/transcribe" className="btn">

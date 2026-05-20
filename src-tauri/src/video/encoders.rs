@@ -102,7 +102,11 @@ fn smoke_test_encoder(encoder: &str) -> (bool, Option<String>) {
     }
     cmd.arg("-");
 
-    let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
+    let mut child = match cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => return (false, Some(e.to_string())),
     };
@@ -329,10 +333,7 @@ fn build_video_export_preflight() -> VideoExportPreflight {
                 let (ok, err) = smoke_test_encoder(name);
                 (ok, err.filter(|s| !s.is_empty()))
             } else {
-                (
-                    false,
-                    Some("Skipped (NVENC available)".to_string()),
-                )
+                (false, Some("Skipped (NVENC available)".to_string()))
             }
         } else if is_listed {
             (true, None)
@@ -348,11 +349,12 @@ fn build_video_export_preflight() -> VideoExportPreflight {
         });
     }
 
-    let recommended_encoder = pick_recommended_hardware(&encoders).or(Some(VideoExportEncoderKind::Software));
+    let recommended_encoder =
+        pick_recommended_hardware(&encoders).or(Some(VideoExportEncoderKind::Software));
 
-    let nvenc_ok = encoders.iter().any(|e| {
-        e.kind == VideoExportEncoderKind::Nvenc && e.listed && e.verified
-    });
+    let nvenc_ok = encoders
+        .iter()
+        .any(|e| e.kind == VideoExportEncoderKind::Nvenc && e.listed && e.verified);
     let cuda_overlay_available = overlay_cuda && scale_cuda && nvenc_ok;
 
     VideoExportPreflight {
@@ -389,12 +391,15 @@ pub fn refresh_video_export_preflight_cache() -> VideoExportPreflight {
     built
 }
 
-fn pick_recommended_hardware(encoders: &[VideoExportEncoderInfo]) -> Option<VideoExportEncoderKind> {
+fn pick_recommended_hardware(
+    encoders: &[VideoExportEncoderInfo],
+) -> Option<VideoExportEncoderKind> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(e) = encoders.iter().find(|e| {
-            e.kind == VideoExportEncoderKind::VideoToolbox && e.listed && e.verified
-        }) {
+        if let Some(e) = encoders
+            .iter()
+            .find(|e| e.kind == VideoExportEncoderKind::VideoToolbox && e.listed && e.verified)
+        {
             return Some(e.kind);
         }
     }
@@ -406,7 +411,10 @@ fn pick_recommended_hardware(encoders: &[VideoExportEncoderInfo]) -> Option<Vide
             VideoExportEncoderKind::Qsv,
             VideoExportEncoderKind::Amf,
         ] {
-            if let Some(e) = encoders.iter().find(|e| e.kind == kind && e.listed && e.verified) {
+            if let Some(e) = encoders
+                .iter()
+                .find(|e| e.kind == kind && e.listed && e.verified)
+            {
                 return Some(e.kind);
             }
         }
@@ -415,7 +423,10 @@ fn pick_recommended_hardware(encoders: &[VideoExportEncoderInfo]) -> Option<Vide
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         for kind in [VideoExportEncoderKind::Nvenc, VideoExportEncoderKind::Qsv] {
-            if let Some(e) = encoders.iter().find(|e| e.kind == kind && e.listed && e.verified) {
+            if let Some(e) = encoders
+                .iter()
+                .find(|e| e.kind == kind && e.listed && e.verified)
+            {
                 return Some(e.kind);
             }
         }
@@ -491,12 +502,14 @@ pub fn resolve_encoder_for_export(
     }
 }
 
-pub fn build_video_encoder_args(
-    kind: VideoExportEncoderKind,
-    fast: bool,
-) -> Vec<String> {
+pub fn build_video_encoder_args(kind: VideoExportEncoderKind, fast: bool) -> Vec<String> {
     let name = encoder_kind_to_name(kind);
-    let mut args = vec!["-c:v".into(), name.to_string(), "-pix_fmt".into(), "yuv420p".into()];
+    let mut args = vec![
+        "-c:v".into(),
+        name.to_string(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+    ];
     match kind {
         VideoExportEncoderKind::Nvenc => {
             args.push("-preset".into());

@@ -352,6 +352,8 @@ export function VideosPage() {
               videoId: editingVideo.id,
               clips: nextClips,
               videoClips: nextVideoClips,
+              contentStartMs: timeline?.contentStartMs,
+              contentEndMs: timeline?.contentEndMs,
               updatedAt: new Date().toISOString(),
             };
             await saveFinalVideoTimeline(project.rootPath, nextTimeline);

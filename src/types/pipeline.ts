@@ -35,6 +35,28 @@ export interface OverlayCandidate {
   status: OverlayCandidateStatus;
 }
 
+export interface EpisodeContentBounds {
+  contentStartMs: number;
+  contentEndMs: number;
+  videoDurationMs?: number;
+  rationale: string;
+}
+
+export interface AssetPlacement {
+  id: string;
+  assetFileName: string;
+  triggerWord?: string;
+  placementKind: "intro" | "outro" | "trigger" | string;
+  timelineMode: "insert" | "overlay" | string;
+  startMs: number;
+  durationMs: number;
+  transcriptExcerpt?: string;
+  verified: boolean;
+  rationale: string;
+  trackIndex: number;
+  fullScreen: boolean;
+}
+
 export interface OverlaySuggestion {
   id: string;
   title: string;
@@ -55,6 +77,8 @@ export interface TranscriptAnalysis {
   suggestions: OverlaySuggestion[];
   analyzedAt: string;
   model: string;
+  contentBounds?: EpisodeContentBounds;
+  assetPlacements?: AssetPlacement[];
 }
 
 export interface OverlayImageVersion {
@@ -122,6 +146,14 @@ export interface PipelineProgress {
   episodeTotal?: number;
 }
 
+export interface ProjectScanProgress {
+  index: number;
+  total: number;
+  fileName: string;
+  stage: string;
+  message?: string;
+}
+
 export type VideoExportMode = "auto" | "software" | "hardware";
 export type VideoExportQuality = "fast" | "balanced";
 
@@ -152,6 +184,8 @@ export interface VideoExportPreflight {
 
 export interface ProjectSettings {
   showContext: string;
+  /** Folder containing reusable user assets referenced by the master prompt. */
+  assetFolderPath?: string;
   maxCandidatesPerVideo: number;
   openaiTextModel: string;
   openaiImageModel: string;
@@ -215,6 +249,9 @@ export interface TimelineVideoClip {
   /** Path relative to the project root. */
   sourceRelativePath: string;
   fileName: string;
+  /** insert = spliced into the base episode; overlay = composited above it. */
+  timelineMode?: "insert" | "overlay" | string;
+  placementKind?: "intro" | "outro" | "trigger" | string;
   startMs: number;
   durationMs: number;
   sourceDurationMs: number;
@@ -226,10 +263,16 @@ export interface TimelineVideoClip {
   trackIndex: number;
 }
 
+export interface PlayheadOverlayResult {
+  clip: VideoOverlayClip;
+}
+
 export interface FinalVideoTimeline {
   videoId: string;
   clips: VideoOverlayClip[];
   videoClips?: TimelineVideoClip[];
+  contentStartMs?: number;
+  contentEndMs?: number;
   updatedAt: string;
 }
 

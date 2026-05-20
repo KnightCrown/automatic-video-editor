@@ -249,10 +249,13 @@ export function FinalVideoPage() {
           rootPath={project.rootPath}
           initialClips={editingClips}
           onSave={async ({ clips, videoClips }) => {
+            const existing = timelineByVideo[editingVideo.id];
             const timeline: FinalVideoTimeline = {
               videoId: editingVideo.id,
               clips,
               videoClips,
+              contentStartMs: existing?.contentStartMs,
+              contentEndMs: existing?.contentEndMs,
               updatedAt: new Date().toISOString(),
             };
             await saveFinalVideoTimeline(project.rootPath, timeline);

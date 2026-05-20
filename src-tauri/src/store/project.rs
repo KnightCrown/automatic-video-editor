@@ -55,7 +55,8 @@ pub fn ensure_project_dirs(paths: &ProjectPaths) -> Result<(), String> {
         &paths.cache,
         &base.join("audio"),
     ] {
-        fs::create_dir_all(dir).map_err(|e| format!("create_dir_failed:{}:{}", dir.display(), e))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("create_dir_failed:{}:{}", dir.display(), e))?;
     }
     Ok(())
 }
@@ -93,19 +94,17 @@ pub fn save_project(manifest: &ProjectManifest) -> Result<(), String> {
 }
 
 pub fn transcript_path(paths: &ProjectPaths, video_id: &str) -> PathBuf {
-    paths.transcripts.join(format!("{video_id}.transcript.json"))
+    paths
+        .transcripts
+        .join(format!("{video_id}.transcript.json"))
 }
 
 pub fn candidates_path(paths: &ProjectPaths, video_id: &str) -> PathBuf {
-    paths
-        .candidates
-        .join(format!("{video_id}.candidates.json"))
+    paths.candidates.join(format!("{video_id}.candidates.json"))
 }
 
 pub fn analysis_path(paths: &ProjectPaths, video_id: &str) -> PathBuf {
-    paths
-        .suggestions
-        .join(format!("{video_id}.analysis.json"))
+    paths.suggestions.join(format!("{video_id}.analysis.json"))
 }
 
 fn devotiontime_base(paths: &ProjectPaths) -> Result<PathBuf, String> {
@@ -120,7 +119,10 @@ pub fn overlay_video_image_dir(paths: &ProjectPaths, video_id: &str) -> Result<P
     Ok(devotiontime_base(paths)?.join("images").join(video_id))
 }
 
-pub fn overlay_images_manifest_path(paths: &ProjectPaths, video_id: &str) -> Result<PathBuf, String> {
+pub fn overlay_images_manifest_path(
+    paths: &ProjectPaths,
+    video_id: &str,
+) -> Result<PathBuf, String> {
     Ok(devotiontime_base(paths)?
         .join("images")
         .join(format!("{video_id}.manifest.json")))
@@ -233,7 +235,9 @@ pub fn append_final_video_export(
     }
     let mut manifest = load_final_video_exports(paths, video_id)?;
     manifest.exports.push(export);
-    manifest.exports.sort_by(|a, b| b.exported_at.cmp(&a.exported_at));
+    manifest
+        .exports
+        .sort_by(|a, b| b.exported_at.cmp(&a.exported_at));
     let raw = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serialize_final_video_exports:{e}"))?;
     fs::write(&path, raw).map_err(|e| format!("write_final_video_exports:{e}"))?;
@@ -302,8 +306,7 @@ fn list_overlay_manifest_files(paths: &ProjectPaths) -> Result<Vec<PathBuf>, Str
 
 fn manifest_file_stem(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    name.strip_suffix(".manifest.json")
-        .map(|s| s.to_string())
+    name.strip_suffix(".manifest.json").map(|s| s.to_string())
 }
 
 fn adopt_overlay_manifest_for_video(
@@ -414,8 +417,8 @@ pub fn output_dir(paths: &ProjectPaths, candidate_id: &str) -> PathBuf {
 pub fn save_transcript(paths: &ProjectPaths, transcript: &Transcript) -> Result<(), String> {
     ensure_project_dirs(paths)?;
     let path = transcript_path(paths, &transcript.video_id);
-    let raw =
-        serde_json::to_string_pretty(transcript).map_err(|e| format!("serialize_transcript:{}", e))?;
+    let raw = serde_json::to_string_pretty(transcript)
+        .map_err(|e| format!("serialize_transcript:{}", e))?;
     fs::write(path, raw).map_err(|e| format!("write_transcript_failed:{}", e))
 }
 
@@ -520,7 +523,8 @@ pub fn resolve_video_status_from_artifacts(
     video_id: &str,
     video_path: &str,
 ) -> Result<String, String> {
-    if let Some(img_manifest) = load_overlay_images_manifest_for_video(paths, video_id, video_path)? {
+    if let Some(img_manifest) = load_overlay_images_manifest_for_video(paths, video_id, video_path)?
+    {
         if !img_manifest.images.is_empty() {
             return Ok("images_generated".to_string());
         }
@@ -666,7 +670,8 @@ pub fn save_prompt_json(
     let dir = output_dir(paths, candidate_id);
     fs::create_dir_all(&dir).map_err(|e| format!("create_output_dir:{}", e))?;
     let path = dir.join("prompt.json");
-    let raw = serde_json::to_string_pretty(prompt).map_err(|e| format!("serialize_prompt:{}", e))?;
+    let raw =
+        serde_json::to_string_pretty(prompt).map_err(|e| format!("serialize_prompt:{}", e))?;
     fs::write(&path, raw).map_err(|e| format!("write_prompt_failed:{}", e))?;
     Ok(path)
 }

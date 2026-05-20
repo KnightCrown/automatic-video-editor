@@ -8,8 +8,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::image::xai_imagine::generate_imagine_png;
 use crate::store::project::{
-    load_overlay_images_manifest_for_video, load_transcript_analysis_for_video,
-    overlay_video_image_dir, load_project, project_paths, save_overlay_images_manifest,
+    load_overlay_images_manifest_for_video, load_project, load_transcript_analysis_for_video,
+    overlay_video_image_dir, project_paths, save_overlay_images_manifest,
     set_video_pipeline_status,
 };
 use crate::store::secrets::get_xai_api_key;
@@ -40,7 +40,7 @@ fn sync_image_active_version(img: &mut GeneratedOverlayImage) {
     }
 }
 
-fn normalize_manifest_versions(manifest: &mut OverlayImagesManifest) {
+pub(crate) fn normalize_manifest_versions(manifest: &mut OverlayImagesManifest) {
     for img in manifest.images.iter_mut() {
         sync_image_active_version(img);
     }
@@ -56,7 +56,7 @@ fn version_relative_path(video_id: &str, suggestion_id: &str, version_index: usi
     format!(".devotiontime/images/{video_id}/{file}")
 }
 
-fn find_or_insert_image_entry<'a>(
+pub(crate) fn find_or_insert_image_entry<'a>(
     images: &'a mut Vec<GeneratedOverlayImage>,
     suggestion: &OverlaySuggestion,
 ) -> &'a mut GeneratedOverlayImage {
@@ -79,7 +79,7 @@ fn find_or_insert_image_entry<'a>(
     &mut images[last]
 }
 
-fn sanitize_filename_component(id: &str) -> String {
+pub(crate) fn sanitize_filename_component(id: &str) -> String {
     id.chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
@@ -166,13 +166,13 @@ pub async fn generate_overlay_images_for_video(
         .map(|v| v.path)
         .unwrap_or_default();
     let _ = set_video_pipeline_status(&root_path, &video_id, "generating_images");
-    let analysis = load_transcript_analysis_for_video(&paths, &video_id, &video_path)?.ok_or_else(|| {
-        "analysis_not_found: Run Overlays → Analyze transcript first.".to_string()
-    })?;
+    let analysis =
+        load_transcript_analysis_for_video(&paths, &video_id, &video_path)?.ok_or_else(|| {
+            "analysis_not_found: Run Overlays → Analyze transcript first.".to_string()
+        })?;
 
     let filter: HashSet<&str> = suggestion_ids.iter().map(String::as_str).collect();
-    let existing_manifest =
-        load_overlay_images_manifest_for_video(&paths, &video_id, &video_path)?;
+    let existing_manifest = load_overlay_images_manifest_for_video(&paths, &video_id, &video_path)?;
     let mut kept_images: Vec<GeneratedOverlayImage> = existing_manifest
         .as_ref()
         .map(|m| m.images.clone())

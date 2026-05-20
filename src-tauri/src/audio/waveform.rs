@@ -12,8 +12,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::store::project::{
-    load_audio_waveform, load_project, project_paths, save_audio_waveform,
-    transcription_audio_path,
+    load_audio_waveform, load_project, project_paths, save_audio_waveform, transcription_audio_path,
 };
 use crate::types::AudioWaveform;
 
@@ -47,8 +46,8 @@ fn waveform_newer_than_wav(
     let Ok(wav_modified) = wav_path.metadata().and_then(|m| m.modified()) else {
         return false;
     };
-    let Ok(waveform_ts) = chrono::DateTime::parse_from_rfc3339(&waveform.generated_at)
-        .map(|dt| dt.timestamp())
+    let Ok(waveform_ts) =
+        chrono::DateTime::parse_from_rfc3339(&waveform.generated_at).map(|dt| dt.timestamp())
     else {
         return true;
     };
@@ -88,9 +87,7 @@ pub fn generate_audio_waveform_from_file(
     video_path: &str,
     audio_path: &str,
 ) -> Result<AudioWaveform, String> {
-    let source = Box::new(
-        File::open(audio_path).map_err(|e| format!("open_waveform_source:{e}"))?,
-    );
+    let source = Box::new(File::open(audio_path).map_err(|e| format!("open_waveform_source:{e}"))?);
     let mss = MediaSourceStream::new(source, Default::default());
 
     let mut hint = Hint::new();
@@ -232,11 +229,8 @@ pub fn ensure_audio_waveform_for_video(
 
     let wav_path = transcription_audio_path(&paths, video_id)?;
     if wav_path.is_file() {
-        let waveform = generate_audio_waveform_from_file(
-            video_id,
-            &video.path,
-            &wav_path.to_string_lossy(),
-        )?;
+        let waveform =
+            generate_audio_waveform_from_file(video_id, &video.path, &wav_path.to_string_lossy())?;
         save_audio_waveform(&paths, &waveform)?;
         return Ok(waveform);
     }
