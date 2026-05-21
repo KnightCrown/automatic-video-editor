@@ -14,15 +14,14 @@ import {
 import { useProject } from "../context/ProjectContext";
 import { usePipelineActivity } from "../context/PipelineActivityContext";
 import {
-  getOverlayImageDisplayUrl,
   getOverlayImagesManifest,
+  getSavedFinalVideoTimeline,
   getTranscript,
   getTranscriptAnalysis,
   ensureAudioWaveform,
   isApiKeySet,
   isXaiApiKeySet,
   openProject,
-  prepareFinalVideoTimeline,
   prepareFinalVideoTimelineWithSelection,
   regenerateOverlayImage,
 } from "../services/pipelineService";
@@ -49,9 +48,15 @@ import {
 } from "../utils/format";
 import {
   overlayImageVersionTiles,
-  overlayImageVersions,
   type OverlayImageVersionTile,
 } from "../utils/overlayImages";
+import { useOverlayDisplayUrl } from "../hooks/useOverlayDisplayUrl";
+import {
+  getCachedEpisode,
+  getLastActiveVideoId,
+  rememberActiveVideoId,
+  setCachedEpisode,
+} from "../utils/editingEpisodeCache";
 
 type TabId = "overlays" | "images" | "transcript";
 
@@ -77,7 +82,6 @@ export function EditingPage() {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [approvedSuggestionIds, setApprovedSuggestionIds] = useState<Set<string>>(new Set());
-  const [displayUrls, setDisplayUrls] = useState<Record<string, string>>({});
   const [creatingVideo, setCreatingVideo] = useState(false);
   const [createVideoStatus, setCreateVideoStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -110,9 +114,12 @@ export function EditingPage() {
   const handleSelectEpisode = useCallback(
     (videoId: string) => {
       const video = project?.videos.find((v) => v.id === videoId);
-      if (video) setActiveVideoPath(video.path);
+      if (video) {
+        if (project?.rootPath) rememberActiveVideoId(project.rootPath, videoId);
+        setActiveVideoPath(video.path);
+      }
     },
-    [project?.videos],
+    [project?.videos, project?.rootPath],
   );
 
   useEffect(() => {
@@ -141,9 +148,15 @@ export function EditingPage() {
         if (fromNav) return fromNav.path;
       }
 
+      const lastActiveId = getLastActiveVideoId(project.rootPath);
+      if (lastActiveId) {
+        const fromCache = project.videos.find((v) => v.id === lastActiveId);
+        if (fromCache) return fromCache.path;
+      }
+
       return project.videos[0].path;
     });
-  }, [videoListKey, initialVideoId]);
+  }, [videoListKey, initialVideoId, project?.rootPath]);
 
   useEffect(() => {
     if (!initialVideoId) return;
@@ -151,25 +164,50 @@ export function EditingPage() {
   }, [initialVideoId, location.pathname, navigate]);
 
   useEffect(() => {
+    if (!project?.rootPath || !activeVideo) return;
+    rememberActiveVideoId(project.rootPath, activeVideo.id);
+    const cached = getCachedEpisode(project.rootPath, activeVideo.id);
+    if (cached) {
+      setAnalysis(cached.analysis);
+      setManifest(cached.manifest);
+      setTranscript(cached.transcript);
+      setApprovedSuggestionIds(new Set(cached.approvedSuggestionIds));
+      setSelectedSuggestionId(cached.selectedSuggestionId);
+      setPromptDrafts(cached.promptDrafts);
+      return;
+    }
     setAnalysis(null);
     setManifest(null);
     setTranscript(null);
-    setDisplayUrls({});
     setSelectedSuggestionId(null);
     setApprovedSuggestionIds(new Set());
     setPromptDrafts({});
-  }, [activeVideoPath]);
+  }, [project?.rootPath, activeVideo?.id]);
+
+  const applyApprovedFromTimeline = useCallback(
+    (
+      savedTimeline: Awaited<ReturnType<typeof getSavedFinalVideoTimeline>>,
+      analysisResult: TranscriptAnalysis | null,
+    ) => {
+      if (savedTimeline?.clips.length) {
+        setApprovedSuggestionIds(new Set(savedTimeline.clips.map((c) => c.suggestionId)));
+      } else if (analysisResult?.suggestions.length) {
+        setApprovedSuggestionIds(new Set(analysisResult.suggestions.map((s) => s.id)));
+      } else {
+        setApprovedSuggestionIds(new Set());
+      }
+    },
+    [],
+  );
 
   const reloadEpisodeData = useCallback(async () => {
     if (!project || !activeVideo) return;
     const video = activeVideo;
-    const timeline = await prepareFinalVideoTimeline(project.rootPath, video.id).catch(
-      () => null,
-    );
-    const [a, m, t] = await Promise.all([
+    const [a, m, t, savedTimeline] = await Promise.all([
       getTranscriptAnalysis(project.rootPath, video.id).catch(() => null),
       getOverlayImagesManifest(project.rootPath, video.id).catch(() => null),
       getTranscript(project.rootPath, video.id).catch(() => null),
+      getSavedFinalVideoTimeline(project.rootPath, video.id).catch(() => null),
     ]);
     setAnalysis(a);
     setManifest(m);
@@ -181,60 +219,33 @@ export function EditingPage() {
     } else {
       setSelectedSuggestionId(null);
     }
-    if (timeline?.clips.length) {
-      setApprovedSuggestionIds(new Set(timeline.clips.map((c) => c.suggestionId)));
-    } else if (a?.suggestions.length) {
-      setApprovedSuggestionIds(new Set(a.suggestions.map((s) => s.id)));
-    } else {
-      setApprovedSuggestionIds(new Set());
-    }
-  }, [project, activeVideo]);
+    applyApprovedFromTimeline(savedTimeline, a);
+  }, [project, activeVideo, applyApprovedFromTimeline]);
 
   useEffect(() => {
     void reloadEpisodeData();
   }, [reloadEpisodeData]);
 
   useEffect(() => {
-    if (!project?.updatedAt) return;
-    void reloadEpisodeData();
-  }, [project?.updatedAt, reloadEpisodeData]);
-
-  useEffect(() => {
-    if (!project?.rootPath || !manifest?.images.length) {
-      setDisplayUrls({});
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      const urls: Record<string, string> = {};
-      const loads: { key: string; relativePath: string }[] = [];
-      for (const img of manifest.images) {
-        for (const version of overlayImageVersions(img)) {
-          loads.push({ key: version.relativePath, relativePath: version.relativePath });
-        }
-      }
-      await Promise.all(
-        loads.map(async ({ key, relativePath }) => {
-          try {
-            urls[key] = await getOverlayImageDisplayUrl(project.rootPath, relativePath);
-          } catch {
-            /* skip */
-          }
-        }),
-      );
-      for (const img of manifest.images) {
-        const versions = overlayImageVersions(img);
-        const latest = versions[versions.length - 1];
-        if (latest && urls[latest.relativePath]) {
-          urls[img.suggestionId] = urls[latest.relativePath];
-        }
-      }
-      if (!cancelled) setDisplayUrls(urls);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [project?.rootPath, manifest]);
+    if (!project?.rootPath || !activeVideo) return;
+    setCachedEpisode(project.rootPath, activeVideo.id, {
+      analysis,
+      manifest,
+      transcript,
+      approvedSuggestionIds: [...approvedSuggestionIds],
+      selectedSuggestionId,
+      promptDrafts,
+    });
+  }, [
+    project?.rootPath,
+    activeVideo?.id,
+    analysis,
+    manifest,
+    transcript,
+    approvedSuggestionIds,
+    selectedSuggestionId,
+    promptDrafts,
+  ]);
 
   const selectedSuggestion = useMemo(
     () => analysis?.suggestions.find((s) => s.id === selectedSuggestionId) ?? null,
@@ -639,8 +650,9 @@ export function EditingPage() {
                     analyzing={analyzing}
                     hasAnalysis={hasAnalysis}
                     analysis={analysis}
+                    manifest={manifest}
+                    rootPath={project.rootPath}
                     generatedSuggestionIds={generatedSuggestionIds}
-                    displayUrls={displayUrls}
                     selectedSuggestionId={selectedSuggestionId}
                     approvedSuggestionIds={approvedSuggestionIds}
                     onTranscribe={() => void handleTranscribe()}
@@ -660,7 +672,7 @@ export function EditingPage() {
                     generating={generating || regeneratingAllImages}
                     imageProgress={imageProgress}
                     manifest={manifest}
-                    displayUrls={displayUrls}
+                    rootPath={project.rootPath}
                     approvedSuggestionIds={approvedSuggestionIds}
                     selectedSuggestionId={selectedSuggestionId}
                     approvedNeedingImagesCount={approvedNeedingImagesCount}
@@ -700,7 +712,7 @@ export function EditingPage() {
           onPromptChange={handlePromptChange}
           onRevertPrompt={handleRevertPrompt}
           versionTiles={versionTilesForSuggestion}
-          displayUrls={displayUrls}
+          rootPath={project.rootPath}
           videoId={activeVideo?.id ?? ""}
           onRegenerateImage={() => void handleRegenerateImage()}
           regenerating={regeneratingOverlay || generating}
@@ -875,6 +887,13 @@ function EpisodeTranscribeBar({
   );
 }
 
+function manifestImagePath(
+  manifest: OverlayImagesManifest | null | undefined,
+  suggestionId: string,
+): string | undefined {
+  return manifest?.images.find((img) => img.suggestionId === suggestionId)?.relativePath;
+}
+
 function OverlaysTabContent({
   hasTranscript,
   transcribing,
@@ -883,8 +902,9 @@ function OverlaysTabContent({
   analyzing,
   hasAnalysis,
   analysis,
+  manifest,
+  rootPath,
   generatedSuggestionIds,
-  displayUrls,
   selectedSuggestionId,
   approvedSuggestionIds,
   onTranscribe,
@@ -900,8 +920,9 @@ function OverlaysTabContent({
   analyzing: boolean;
   hasAnalysis: boolean;
   analysis: TranscriptAnalysis | null;
+  manifest: OverlayImagesManifest | null;
+  rootPath: string;
   generatedSuggestionIds: Set<string>;
-  displayUrls: Record<string, string>;
   selectedSuggestionId: string | null;
   approvedSuggestionIds: Set<string>;
   onTranscribe: () => void;
@@ -958,8 +979,9 @@ function OverlaysTabContent({
           ) : null}
           <OverlaySuggestionsTable
             analysis={analysis}
+            manifest={manifest}
+            rootPath={rootPath}
             generatedSuggestionIds={generatedSuggestionIds}
-            displayUrls={displayUrls}
             selectedSuggestionId={selectedSuggestionId}
             approvedSuggestionIds={approvedSuggestionIds}
             onSelectSuggestion={onSelectSuggestion}
@@ -1109,8 +1131,9 @@ function buildOverlayTimelineRows(analysis: TranscriptAnalysis): OverlayTimeline
 
 function OverlaySuggestionsTable({
   analysis,
+  manifest,
+  rootPath,
   generatedSuggestionIds,
-  displayUrls,
   selectedSuggestionId,
   approvedSuggestionIds,
   onSelectSuggestion,
@@ -1118,8 +1141,9 @@ function OverlaySuggestionsTable({
   onOpenLightbox,
 }: {
   analysis: TranscriptAnalysis;
+  manifest: OverlayImagesManifest | null;
+  rootPath: string;
   generatedSuggestionIds: Set<string>;
-  displayUrls: Record<string, string>;
   selectedSuggestionId: string | null;
   approvedSuggestionIds: Set<string>;
   onSelectSuggestion: (id: string) => void;
@@ -1166,7 +1190,8 @@ function OverlaySuggestionsTable({
                   displayEndMs={row.displayEndMs}
                   highlight={selectedSuggestionId === row.suggestion.id}
                   hasImage={generatedSuggestionIds.has(row.suggestion.id)}
-                  displayUrl={displayUrls[row.suggestion.id]}
+                  rootPath={rootPath}
+                  imageRelativePath={manifestImagePath(manifest, row.suggestion.id)}
                   status={overlayRowStatus(
                     row.suggestion.id,
                     generatedSuggestionIds.has(row.suggestion.id),
@@ -1331,7 +1356,8 @@ function SuggestionRow({
   displayEndMs,
   highlight,
   hasImage,
-  displayUrl,
+  rootPath,
+  imageRelativePath,
   status,
   checked,
   onToggleChecked,
@@ -1344,7 +1370,8 @@ function SuggestionRow({
   displayEndMs?: number;
   highlight: boolean;
   hasImage: boolean;
-  displayUrl?: string;
+  rootPath: string;
+  imageRelativePath?: string;
   status: OverlayRowStatus;
   checked: boolean;
   onToggleChecked: () => void;
@@ -1352,6 +1379,11 @@ function SuggestionRow({
   onToggleApproval: () => void;
   onOpenLightbox: (imageUrl?: string) => void;
 }) {
+  const displayUrl = useOverlayDisplayUrl(
+    hasImage ? rootPath : undefined,
+    hasImage ? imageRelativePath : undefined,
+  );
+
   return (
     <tr
       className={`cursor-pointer hover:bg-white hover:bg-opacity-5 ${
@@ -1422,7 +1454,7 @@ function ImagesTabContent({
   generating,
   imageProgress,
   manifest,
-  displayUrls,
+  rootPath,
   approvedSuggestionIds,
   selectedSuggestionId,
   approvedNeedingImagesCount,
@@ -1441,7 +1473,7 @@ function ImagesTabContent({
   generating: boolean;
   imageProgress: ImageGenerationProgress | null;
   manifest: OverlayImagesManifest | null;
-  displayUrls: Record<string, string>;
+  rootPath: string;
   approvedSuggestionIds: Set<string>;
   selectedSuggestionId: string | null;
   approvedNeedingImagesCount: number;
@@ -1487,7 +1519,7 @@ function ImagesTabContent({
         generating={generating}
         imageProgress={imageProgress}
         manifest={manifest}
-        displayUrls={displayUrls}
+        rootPath={rootPath}
         approvedSuggestionIds={approvedSuggestionIds}
         selectedSuggestionId={selectedSuggestionId}
         approvedNeedingImagesCount={approvedNeedingImagesCount}
@@ -1505,7 +1537,7 @@ function ImagesTabBody(props: {
   generating: boolean;
   imageProgress: ImageGenerationProgress | null;
   manifest: OverlayImagesManifest | null;
-  displayUrls: Record<string, string>;
+  rootPath: string;
   approvedSuggestionIds: Set<string>;
   selectedSuggestionId: string | null;
   approvedNeedingImagesCount: number;
@@ -1522,7 +1554,7 @@ function ImagesTabBody(props: {
     generating,
     imageProgress,
     manifest,
-    displayUrls,
+    rootPath,
     approvedSuggestionIds,
     selectedSuggestionId,
     approvedNeedingImagesCount,
@@ -1580,14 +1612,12 @@ function ImagesTabBody(props: {
             <ImageSelectCard
               key={img.suggestionId}
               img={img}
-              displayUrl={displayUrls[img.suggestionId]}
+              rootPath={rootPath}
               approved={approvedSuggestionIds.has(img.suggestionId)}
               isFocused={selectedSuggestionId === img.suggestionId}
               onToggle={() => onToggleImage(img.suggestionId)}
               onSelect={() => onSelectImage(img.suggestionId)}
-              onOpenLightbox={() =>
-                onOpenLightbox(img, displayUrls[img.suggestionId])
-              }
+              onOpenLightbox={(url) => onOpenLightbox(img, url)}
             />
           ))}
           </div>
@@ -1604,21 +1634,23 @@ function ImagesTabBody(props: {
 
 function ImageSelectCard({
   img,
-  displayUrl,
+  rootPath,
   approved,
   isFocused,
   onToggle,
   onSelect,
   onOpenLightbox,
 }: {
-  img: { suggestionId: string; title: string; transcriptExcerpt: string };
-  displayUrl?: string;
+  img: { suggestionId: string; title: string; transcriptExcerpt: string; relativePath: string };
+  rootPath: string;
   approved: boolean;
   isFocused: boolean;
   onToggle: () => void;
   onSelect: () => void;
-  onOpenLightbox: () => void;
+  onOpenLightbox: (imageUrl?: string) => void;
 }) {
+  const displayUrl = useOverlayDisplayUrl(rootPath, img.relativePath);
+
   return (
     <div
       role="button"
@@ -1650,7 +1682,7 @@ function ImageSelectCard({
         title={displayUrl ? "View image" : undefined}
         onClick={(e) => {
           e.stopPropagation();
-          onOpenLightbox();
+          onOpenLightbox(displayUrl);
         }}
         className="w-full aspect-video bg-background rounded-lg overflow-hidden flex items-center justify-center border border-border disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow"
       >
@@ -1756,6 +1788,51 @@ function TranscriptSegmentList({ transcript }: { transcript: Transcript }) {
   );
 }
 
+function PromptVersionTile({
+  tile,
+  rootPath,
+  onOpenLightbox,
+}: {
+  tile: OverlayImageVersionTile;
+  rootPath: string;
+  onOpenLightbox: (
+    img: { suggestionId: string; title: string; transcriptExcerpt: string },
+    imageUrl?: string,
+  ) => void;
+}) {
+  const url = useOverlayDisplayUrl(rootPath, tile.relativePath);
+
+  return (
+    <button
+      type="button"
+      disabled={!url}
+      title={url ? `${tile.versionLabel} — view image` : undefined}
+      onClick={() =>
+        onOpenLightbox(
+          {
+            suggestionId: tile.suggestionId,
+            title: tile.title,
+            transcriptExcerpt: tile.transcriptExcerpt,
+          },
+          url,
+        )
+      }
+      className={`aspect-video bg-background border rounded-lg overflow-hidden relative disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow ${
+        tile.isLatest ? "border-primary/60" : "border-border"
+      }`}
+    >
+      {url ? (
+        <img src={url} alt={tile.title} className="w-full h-full object-cover" />
+      ) : (
+        <ImageIcon className="absolute inset-0 m-auto text-border" size={24} />
+      )}
+      <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[10px] text-white px-1 py-0.5 text-center truncate">
+        {tile.versionLabel}
+      </span>
+    </button>
+  );
+}
+
 function PromptPanel({
   suggestion,
   selectedAsset,
@@ -1764,7 +1841,7 @@ function PromptPanel({
   onPromptChange,
   onRevertPrompt,
   versionTiles,
-  displayUrls,
+  rootPath,
   videoId,
   onRegenerateImage,
   regenerating,
@@ -1778,7 +1855,7 @@ function PromptPanel({
   onPromptChange: (text: string) => void;
   onRevertPrompt: () => void;
   versionTiles: OverlayImageVersionTile[];
-  displayUrls: Record<string, string>;
+  rootPath: string;
   videoId: string;
   onRegenerateImage: () => void;
   regenerating: boolean;
@@ -1859,39 +1936,14 @@ function PromptPanel({
                 <p className="text-xs text-textMuted mb-4">Not generated yet.</p>
               ) : (
                 <div className="grid grid-cols-2 gap-2 mb-4">
-                  {versionTiles.map((tile) => {
-                    const url = displayUrls[tile.relativePath];
-                    return (
-                      <button
-                        key={tile.relativePath}
-                        type="button"
-                        disabled={!url}
-                        title={url ? `${tile.versionLabel} — view image` : undefined}
-                        onClick={() =>
-                          onOpenLightbox(
-                            {
-                              suggestionId: tile.suggestionId,
-                              title: tile.title,
-                              transcriptExcerpt: tile.transcriptExcerpt,
-                            },
-                            url,
-                          )
-                        }
-                        className={`aspect-video bg-background border rounded-lg overflow-hidden relative disabled:cursor-default hover:ring-1 hover:ring-primary/50 transition-shadow ${
-                          tile.isLatest ? "border-primary/60" : "border-border"
-                        }`}
-                      >
-                        {url ? (
-                          <img src={url} alt={tile.title} className="w-full h-full object-cover" />
-                        ) : (
-                          <ImageIcon className="absolute inset-0 m-auto text-border" size={24} />
-                        )}
-                        <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[10px] text-white px-1 py-0.5 text-center truncate">
-                          {tile.versionLabel}
-                        </span>
-                      </button>
-                    );
-                  })}
+                  {versionTiles.map((tile) => (
+                    <PromptVersionTile
+                      key={tile.relativePath}
+                      tile={tile}
+                      rootPath={rootPath}
+                      onOpenLightbox={onOpenLightbox}
+                    />
+                  ))}
                 </div>
               )}
             </>

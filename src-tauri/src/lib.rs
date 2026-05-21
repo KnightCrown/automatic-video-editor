@@ -385,11 +385,29 @@ fn get_transcript_analysis(
 }
 
 #[tauri::command]
+fn refresh_asset_placements(
+    root_path: String,
+    video_id: String,
+) -> Result<Option<TranscriptAnalysis>, String> {
+    refresh_asset_placements_from_current_prompt(&root_path, &video_id)?;
+    get_transcript_analysis(root_path, video_id)
+}
+
+#[tauri::command]
 fn get_final_video_timeline(
     root_path: String,
     video_id: String,
 ) -> Result<FinalVideoTimeline, String> {
     resolve_final_video_timeline(&root_path, &video_id)
+}
+
+#[tauri::command]
+fn get_saved_final_video_timeline(
+    root_path: String,
+    video_id: String,
+) -> Result<Option<FinalVideoTimeline>, String> {
+    let paths = project_paths(&root_path)?;
+    load_final_video_timeline(&paths, &video_id)
 }
 
 #[tauri::command]
@@ -558,6 +576,7 @@ pub fn run() {
             get_transcript,
             analyze_transcript_with_openai,
             get_transcript_analysis,
+            refresh_asset_placements,
             save_xai_api_key_cmd,
             clear_xai_api_key_cmd,
             check_xai_api_key_set,
@@ -568,6 +587,7 @@ pub fn run() {
             resolve_overlay_image_path,
             read_overlay_image_data_url,
             get_final_video_timeline,
+            get_saved_final_video_timeline,
             rebuild_final_video_timeline,
             save_final_video_timeline_cmd,
             ensure_audio_waveform,

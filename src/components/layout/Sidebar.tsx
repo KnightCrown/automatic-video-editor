@@ -16,11 +16,12 @@ export const Sidebar = () => {
     }
     let cancelled = false;
     void (async () => {
-      let count = 0;
-      for (const video of project.videos) {
-        const m = await getOverlayImagesManifest(project.rootPath, video.id);
-        count += m?.images.length ?? 0;
-      }
+      const manifests = await Promise.all(
+        project.videos.map((video) =>
+          getOverlayImagesManifest(project.rootPath, video.id),
+        ),
+      );
+      const count = manifests.reduce((sum, m) => sum + (m?.images.length ?? 0), 0);
       if (!cancelled) setImageCount(count);
     })();
     return () => {

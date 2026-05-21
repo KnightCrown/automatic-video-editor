@@ -128,6 +128,17 @@ export async function getTranscriptAnalysis(
   });
 }
 
+/** Refresh prompt-driven asset placements without rebuilding the full timeline. */
+export async function refreshAssetPlacements(
+  rootPath: string,
+  videoId: string,
+): Promise<TranscriptAnalysis | null> {
+  return invoke<TranscriptAnalysis | null>("refresh_asset_placements", {
+    rootPath,
+    videoId,
+  });
+}
+
 export async function saveApiKey(apiKey: string): Promise<void> {
   await invoke("save_api_key", { apiKey });
 }
@@ -258,6 +269,17 @@ export async function getFinalVideoTimeline(
   videoId: string,
 ): Promise<FinalVideoTimeline> {
   return invoke<FinalVideoTimeline>("get_final_video_timeline", {
+    rootPath,
+    videoId,
+  });
+}
+
+/** Read saved timeline JSON only — no rebuild, ffprobe, or asset copy. */
+export async function getSavedFinalVideoTimeline(
+  rootPath: string,
+  videoId: string,
+): Promise<FinalVideoTimeline | null> {
+  return invoke<FinalVideoTimeline | null>("get_saved_final_video_timeline", {
     rootPath,
     videoId,
   });
