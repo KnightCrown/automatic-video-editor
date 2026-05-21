@@ -619,6 +619,8 @@ fn build_extra_video_audio_chain(
     video_clips: &[TimelineVideoClip],
     extra_input_start: usize,
     extra_has_audio: &[bool],
+    base_has_audio: bool,
+    total_duration_sec: f64,
 ) -> Option<String> {
     let audio_clips: Vec<(usize, &TimelineVideoClip)> = video_clips
         .iter()
@@ -631,7 +633,14 @@ fn build_extra_video_audio_chain(
         return None;
     }
 
-    let mut parts = vec!["[0:a]aresample=48000,aformat=channel_layouts=stereo[abase]".to_string()];
+    let total_duration_sec = total_duration_sec.max(0.1);
+    let mut parts = if base_has_audio {
+        vec!["[0:a]aresample=48000,aformat=channel_layouts=stereo[abase]".to_string()]
+    } else {
+        vec![format!(
+            "anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={total_duration_sec:.3},asetpts=PTS-STARTPTS[abase]"
+        )]
+    };
     let mut inputs = vec!["[abase]".to_string()];
 
     for (audio_i, (clip_i, clip)) in audio_clips.iter().enumerate() {
@@ -641,8 +650,9 @@ fn build_extra_video_audio_chain(
         let delay = clip.start_ms;
         let volume = extra_video_volume(clip);
         let label = format!("aud{audio_i}");
+        // Do not use apad without whole_dur — infinite padding makes amix hang near EOF.
         parts.push(format!(
-            "[{input_idx}:a]atrim=start={trim_start}:duration={duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={volume:.3},adelay={delay}|{delay},apad[{label}]"
+            "[{input_idx}:a]atrim=start={trim_start}:duration={duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={volume:.3},adelay={delay}|{delay}[{label}]"
         ));
         inputs.push(format!("[{label}]"));
     }
@@ -663,6 +673,8 @@ fn build_full_cpu_filter_complex(
     video_w: u32,
     video_h: u32,
     extra_has_audio: &[bool],
+    base_has_audio: bool,
+    total_duration_sec: f64,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -695,9 +707,13 @@ fn build_full_cpu_filter_complex(
         ));
     }
 
-    if let Some(audio_chain) =
-        build_extra_video_audio_chain(video_clips, extra_input_start, extra_has_audio)
-    {
+    if let Some(audio_chain) = build_extra_video_audio_chain(
+        video_clips,
+        extra_input_start,
+        extra_has_audio,
+        base_has_audio,
+        total_duration_sec,
+    ) {
         parts.push(audio_chain);
     }
 
@@ -838,6 +854,7 @@ fn build_export_runs(
         .map(|path| probe_has_audio_stream(path))
         .collect();
     let has_extra_audio = extra_has_audio.iter().any(|has_audio| *has_audio);
+    let base_has_audio = probe_has_audio_stream(Path::new(video_path));
 
     let hw_encoder = if encoder == VideoExportEncoderKind::Software {
         None
@@ -902,6 +919,8 @@ fn build_export_runs(
                     video_w,
                     video_h,
                     &extra_has_audio,
+                    base_has_audio,
+                    duration_sec,
                 );
                 args.push("-filter_complex".into());
                 args.push(video_filter);
@@ -947,6 +966,8 @@ fn build_export_runs(
             video_w,
             video_h,
             &extra_has_audio,
+            base_has_audio,
+            duration_sec,
         );
         args.push("-filter_complex".into());
         args.push(video_filter);
@@ -1051,17 +1072,25 @@ fn spawn_ffmpeg_stderr_progress(
                 if fragment.is_empty() {
                     continue;
                 }
+                if fragment.contains("progress=end") {
+                    emit(99.0, Some("Finalizing export…".to_string()));
+                    continue;
+                }
                 if let Some(t) = parse_ffmpeg_progress_sec(fragment) {
-                    let pct = ((t / duration_sec.max(0.1)) * 85.0 + 10.0).clamp(10.0, 95.0) as f32;
+                    let pct = ((t / duration_sec.max(0.1)) * 88.0 + 10.0).clamp(10.0, 98.0) as f32;
                     emit(pct, None);
                 }
             }
 
-            if let Some(t) = parse_ffmpeg_progress_sec(&carry) {
-                let pct = ((t / duration_sec.max(0.1)) * 85.0 + 10.0).clamp(10.0, 95.0) as f32;
+            if carry.contains("progress=end") {
+                emit(99.0, Some("Finalizing export…".to_string()));
+            } else if let Some(t) = parse_ffmpeg_progress_sec(&carry) {
+                let pct = ((t / duration_sec.max(0.1)) * 88.0 + 10.0).clamp(10.0, 98.0) as f32;
                 emit(pct, None);
             }
         }
+
+        emit(99.0, Some("Finalizing export…".to_string()));
     });
 }
 
@@ -1093,6 +1122,8 @@ async fn run_ffmpeg_export(
         .arg("-nostdin")
         .arg("-stats_period")
         .arg("0.5")
+        .arg("-max_muxing_queue_size")
+        .arg("1024")
         .args(&run.args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1120,6 +1151,8 @@ async fn run_ffmpeg_export(
             run.stage
         ));
     }
+
+    emit(100.0, Some(format!("Encoding complete ({})", run.stage)));
 
     Ok(())
 }
