@@ -104,12 +104,37 @@ pub fn list_video_assets(asset_folder: &Path) -> Vec<String> {
     files
 }
 
+fn filename_schedule_anchor(file_name: &str) -> Option<ScheduleAnchor> {
+    let stem = asset_stem(&file_name.to_lowercase());
+    if matches!(
+        stem.as_str(),
+        "intro" | "opener" | "opening" | "title" | "pre-roll" | "preroll" | "bumper"
+    ) || (stem.contains("intro") && !stem.contains("outro")) {
+        return Some(ScheduleAnchor::Start);
+    }
+    if matches!(
+        stem.as_str(),
+        "outro" | "closer" | "closing" | "endcard" | "end-card"
+    ) || stem.contains("outro") {
+        return Some(ScheduleAnchor::End);
+    }
+    None
+}
+
+pub(crate) fn is_scheduled_placement_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "scheduled_start" | "scheduled_end" | "intro" | "outro"
+    )
+}
+
 fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> AssetRule {
     let lower_name = asset.file_name.to_lowercase();
     let ctx = show_context.to_lowercase();
     let asset_window = context_window_for_asset(&ctx, &lower_name);
     let asset_clause = context_clause_for_asset(&ctx, &lower_name);
     let stem = asset_stem(&lower_name);
+    let filename_anchor = filename_schedule_anchor(&lower_name);
 
     let end_trigger_phrases = extract_until_phrases(&asset_window);
     let trigger_phrases = extract_trigger_phrases_for_asset(&ctx, &lower_name);
@@ -117,7 +142,11 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
     if let Some(word) = extract_trigger_word_for_asset(&ctx, &lower_name) {
         trigger_words.push(word);
     }
-    if trigger_words.is_empty() && trigger_phrases.is_empty() && stem.len() >= 2 {
+    if filename_anchor.is_none()
+        && trigger_words.is_empty()
+        && trigger_phrases.is_empty()
+        && stem.len() >= 2
+    {
         for marker in [
             format!("says {stem}"),
             format!("say {stem}"),
@@ -125,7 +154,7 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
             format!("hears {stem}"),
             format!("mentions {stem}"),
         ] {
-            if asset_window.contains(&marker) {
+            if contains_word_phrase(&asset_window, &marker) {
                 trigger_words.push(stem.clone());
                 break;
             }
@@ -133,11 +162,13 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
     }
 
     let has_asset_trigger = !trigger_words.is_empty() || !trigger_phrases.is_empty();
-    let schedule_anchor = if has_asset_trigger {
-        ScheduleAnchor::None
-    } else {
-        infer_schedule_anchor(&asset_window)
-    };
+    let schedule_anchor = filename_anchor.unwrap_or_else(|| {
+        if has_asset_trigger {
+            ScheduleAnchor::None
+        } else {
+            infer_schedule_anchor(&asset_window)
+        }
+    });
     let overlay_requested = contains_any(
         &asset_clause,
         &[
@@ -180,12 +211,13 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
             ],
         );
 
-    let timeline_mode = if insert_requested && !overlay_requested {
-        "insert"
+    let timeline_mode = if schedule_anchor != ScheduleAnchor::None {
+        "insert".to_string()
+    } else if insert_requested && !overlay_requested {
+        "insert".to_string()
     } else {
-        "overlay"
-    }
-    .to_string();
+        "overlay".to_string()
+    };
     let render_mode = timeline_mode.clone();
     let placement_kind = match schedule_anchor {
         ScheduleAnchor::Start => "scheduled_start",
@@ -290,6 +322,28 @@ fn infer_schedule_anchor(window: &str) -> ScheduleAnchor {
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
+}
+
+fn contains_word_phrase(text: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(idx) = text[start..].find(phrase) {
+        let abs = start + idx;
+        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after_idx = abs + phrase.len();
+        let after_ok =
+            after_idx >= text.len() || !text.as_bytes()[after_idx].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+        if start >= text.len() {
+            break;
+        }
+    }
+    false
 }
 
 fn asset_stem(asset_name: &str) -> String {
@@ -925,5 +979,50 @@ mod tests {
         assert_eq!(badge.asset_kind, "image");
         assert_eq!(badge.render_mode, "overlay");
         assert!(badge.duration_ms >= 1_500);
+    }
+
+    #[test]
+    fn intro_and_outro_filenames_schedule_as_inserts() {
+        let dir = std::env::temp_dir().join(format!(
+            "devotiontime-assets-intro-outro-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Intro.mp4"), b"not a real video").unwrap();
+        std::fs::write(dir.join("Outro.mp4"), b"not a real video").unwrap();
+
+        let transcript = Transcript {
+            video_id: "v1".to_string(),
+            video_path: "episode.mp4".to_string(),
+            full_text: "Episode content.".to_string(),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms: 4_000,
+                text: "Episode content.".to_string(),
+            }],
+            words: None,
+            probed_video_stream_start_sec: None,
+            probed_audio_stream_start_sec: None,
+            applied_transcript_timing_offset_ms: None,
+        };
+        let prompt = "Use the assets in the folder. When the speaker says introduction, play cheer.mp4.";
+
+        let proposed = propose_asset_triggers(&transcript, prompt, Some(&dir), 60_000, 55_000);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let intro = proposed
+            .iter()
+            .find(|p| p.asset_file_name.eq_ignore_ascii_case("Intro.mp4"))
+            .expect("intro placement");
+        assert_eq!(intro.placement_kind, "scheduled_start");
+        assert_eq!(intro.render_mode, "insert");
+        assert_eq!(intro.start_ms, 0);
+
+        let outro = proposed
+            .iter()
+            .find(|p| p.asset_file_name.eq_ignore_ascii_case("Outro.mp4"))
+            .expect("outro placement");
+        assert_eq!(outro.placement_kind, "scheduled_end");
+        assert_eq!(outro.render_mode, "insert");
     }
 }

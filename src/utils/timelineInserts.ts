@@ -27,8 +27,21 @@ export type TimelineBaseSegment = {
   finalEndMs: number;
 };
 
+export function isScheduledInsertKind(kind?: string | null): boolean {
+  return (
+    kind === "scheduled_start" ||
+    kind === "scheduled_end" ||
+    kind === "intro" ||
+    kind === "outro"
+  );
+}
+
 export function isInsertClip(clip: TimelineVideoClip): boolean {
-  return clip.renderMode === "insert" || clip.timelineMode === "insert";
+  return (
+    clip.renderMode === "insert" ||
+    clip.timelineMode === "insert" ||
+    isScheduledInsertKind(clip.placementKind)
+  );
 }
 
 export function effectiveClipDurationMs(clip: TimelineVideoClip): number {
@@ -41,8 +54,13 @@ export function clipInsertAtMs(
   contentStartMs: number,
   contentEndMs: number,
 ): number {
-  if (clip.startMs <= contentStartMs) return contentStartMs;
-  if (clip.startMs >= contentEndMs) return contentEndMs;
+  const kind = clip.placementKind;
+  if (kind === "scheduled_start" || kind === "intro" || clip.startMs <= contentStartMs) {
+    return contentStartMs;
+  }
+  if (kind === "scheduled_end" || kind === "outro" || clip.startMs >= contentEndMs) {
+    return contentEndMs;
+  }
   return Math.max(contentStartMs, Math.min(contentEndMs, clip.startMs));
 }
 

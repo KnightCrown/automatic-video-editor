@@ -96,7 +96,12 @@ fn ms_to_sec(ms: u64) -> f64 {
 }
 
 fn is_insert_video_clip(clip: &TimelineVideoClip) -> bool {
-    clip.timeline_mode == "insert" || clip.render_mode == "insert"
+    clip.timeline_mode == "insert"
+        || clip.render_mode == "insert"
+        || matches!(
+            clip.placement_kind.as_deref(),
+            Some("scheduled_start" | "scheduled_end" | "intro" | "outro")
+        )
 }
 
 fn shift_clips_for_content_window(

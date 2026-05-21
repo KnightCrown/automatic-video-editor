@@ -1005,14 +1005,33 @@ type InsertDisplayPlan = {
 };
 
 function isInsertAsset(asset: AssetPlacement): boolean {
-  return asset.renderMode === "insert" || asset.timelineMode === "insert";
+  return (
+    asset.renderMode === "insert" ||
+    asset.timelineMode === "insert" ||
+    asset.placementKind === "scheduled_start" ||
+    asset.placementKind === "scheduled_end" ||
+    asset.placementKind === "intro" ||
+    asset.placementKind === "outro"
+  );
 }
 
 function assetInsertAtMs(asset: AssetPlacement, analysis: TranscriptAnalysis): number {
   const contentStart = analysis.contentBounds?.contentStartMs ?? 0;
   const contentEnd = analysis.contentBounds?.contentEndMs ?? asset.startMs;
-  if (asset.startMs <= contentStart) return contentStart;
-  if (asset.startMs >= contentEnd) return contentEnd;
+  if (
+    asset.placementKind === "scheduled_start" ||
+    asset.placementKind === "intro" ||
+    asset.startMs <= contentStart
+  ) {
+    return contentStart;
+  }
+  if (
+    asset.placementKind === "scheduled_end" ||
+    asset.placementKind === "outro" ||
+    asset.startMs >= contentEnd
+  ) {
+    return contentEnd;
+  }
   return Math.max(contentStart, Math.min(contentEnd, asset.startMs));
 }
 

@@ -10,12 +10,32 @@ use crate::store::project::{
 };
 use crate::types::{
     AssetPlacement, FinalVideoTimeline, OverlayClipLayout, OverlayImagesManifest,
-    OverlaySuggestion, TranscriptAnalysis, VideoOverlayClip,
+    OverlaySuggestion, TimelineVideoClip, TranscriptAnalysis, VideoOverlayClip,
 };
 use crate::video::timeline_media::import_asset_clip;
 
 const MIN_DISPLAY_MS: u64 = 500;
 const MAX_DISPLAY_MS: u64 = 15_000;
+
+fn is_insert_timeline_clip(clip: &TimelineVideoClip) -> bool {
+    clip.timeline_mode == "insert"
+        || clip.render_mode == "insert"
+        || matches!(
+            clip.placement_kind.as_deref(),
+            Some("scheduled_start" | "scheduled_end" | "intro" | "outro")
+        )
+}
+
+fn insert_clip_names(clips: &[TimelineVideoClip]) -> Vec<String> {
+    let mut names: Vec<String> = clips
+        .iter()
+        .filter(|clip| is_insert_timeline_clip(clip))
+        .map(|clip| clip.file_name.to_ascii_lowercase())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
 
 pub fn default_duration_ms(suggestion: &OverlaySuggestion) -> u64 {
     if let Some(ideal) = suggestion.ideal_display_ms {
@@ -133,6 +153,7 @@ pub fn resolve_final_video_timeline(
     root_path: &str,
     video_id: &str,
 ) -> Result<FinalVideoTimeline, String> {
+    refresh_asset_placements_from_current_prompt(root_path, video_id)?;
     let paths = project_paths(root_path)?;
     let built = build_default_timeline(root_path, video_id)?;
 
@@ -153,6 +174,13 @@ pub fn resolve_final_video_timeline(
     if saved.video_clips.is_empty() && !built.video_clips.is_empty() {
         save_final_video_timeline(&paths, &built)?;
         return Ok(built);
+    }
+
+    if insert_clip_names(&built.video_clips) != insert_clip_names(&saved.video_clips) {
+        let mut updated = saved;
+        updated.video_clips = built.video_clips;
+        save_final_video_timeline(&paths, &updated)?;
+        return Ok(updated);
     }
 
     Ok(saved)

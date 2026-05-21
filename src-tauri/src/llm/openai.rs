@@ -6,8 +6,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::pipeline::assets::{
-    asset_placements_from_proposals, list_timeline_asset_file_names, propose_asset_triggers,
-    provisional_content_end_ms,
+    asset_placements_from_proposals, is_scheduled_placement_kind, list_timeline_asset_file_names,
+    propose_asset_triggers, provisional_content_end_ms,
 };
 use crate::types::{
     AssetPlacement, EpisodeContentBounds, OverlayCandidate, OverlayPromptResult, OverlaySuggestion,
@@ -230,54 +230,99 @@ fn merge_asset_placements(
     proposed: &[ProposedAssetTrigger],
     reviews: &[OpenAiAssetReviewPayload],
 ) -> Vec<AssetPlacement> {
+    let mut placements = asset_placements_from_proposals(proposed);
     if reviews.is_empty() {
-        return asset_placements_from_proposals(proposed);
+        return placements;
     }
 
-    reviews
+    let reviewed_names: std::collections::HashSet<String> = reviews
         .iter()
-        .filter(|r| r.verified)
-        .map(|r| {
-            let from_proposed = proposed
-                .iter()
-                .filter(|p| p.asset_file_name.eq_ignore_ascii_case(&r.asset_file_name))
-                .min_by_key(|p| p.start_ms.abs_diff(r.proposed_start_ms));
-            AssetPlacement {
-                id: Uuid::new_v4().to_string(),
-                asset_file_name: r.asset_file_name.clone(),
-                asset_kind: from_proposed
-                    .map(|p| p.asset_kind.clone())
-                    .unwrap_or_else(|| "video".to_string()),
-                trigger_word: r.trigger_word.clone(),
-                placement_kind: from_proposed
-                    .map(|p| p.placement_kind.clone())
-                    .unwrap_or_else(|| "trigger".to_string()),
-                timeline_mode: from_proposed
-                    .map(|p| p.timeline_mode.clone())
-                    .unwrap_or_else(|| "overlay".to_string()),
-                render_mode: from_proposed
-                    .map(|p| p.render_mode.clone())
-                    .unwrap_or_else(|| "overlay".to_string()),
-                start_ms: r.proposed_start_ms,
-                duration_ms: r.duration_ms,
-                transcript_excerpt: from_proposed.map(|p| p.transcript_excerpt.clone()),
-                verified: true,
-                rationale: r.rationale.trim().to_string(),
-                track_index: from_proposed
-                    .map(|p| {
-                        if p.timeline_mode == "insert" || p.render_mode == "insert" {
-                            2
-                        } else {
-                            1
-                        }
-                    })
-                    .unwrap_or(1),
-                full_screen: from_proposed
-                    .map(|p| p.full_screen)
-                    .unwrap_or(r.full_screen),
-            }
+        .map(|r| r.asset_file_name.to_ascii_lowercase())
+        .collect();
+
+    placements.retain(|placement| {
+        if is_scheduled_placement_kind(&placement.placement_kind) {
+            return true;
+        }
+        if !reviewed_names.contains(&placement.asset_file_name.to_ascii_lowercase()) {
+            return true;
+        }
+        reviews.iter().any(|review| {
+            review.verified
+                && review
+                    .asset_file_name
+                    .eq_ignore_ascii_case(&placement.asset_file_name)
         })
-        .collect()
+    });
+
+    for review in reviews.iter().filter(|r| r.verified) {
+        if let Some(existing) = placements.iter_mut().find(|placement| {
+            placement
+                .asset_file_name
+                .eq_ignore_ascii_case(&review.asset_file_name)
+        }) {
+            if !is_scheduled_placement_kind(&existing.placement_kind) {
+                existing.start_ms = review.proposed_start_ms;
+                existing.duration_ms = review.duration_ms;
+                existing.trigger_word = review.trigger_word.clone();
+                existing.rationale = review.rationale.trim().to_string();
+                existing.full_screen = review.full_screen;
+            }
+            continue;
+        }
+
+        let from_proposed = proposed
+            .iter()
+            .find(|p| p.asset_file_name.eq_ignore_ascii_case(&review.asset_file_name));
+        placements.push(AssetPlacement {
+            id: Uuid::new_v4().to_string(),
+            asset_file_name: review.asset_file_name.clone(),
+            asset_kind: from_proposed
+                .map(|p| p.asset_kind.clone())
+                .unwrap_or_else(|| "video".to_string()),
+            trigger_word: review.trigger_word.clone(),
+            placement_kind: from_proposed
+                .map(|p| p.placement_kind.clone())
+                .unwrap_or_else(|| "trigger".to_string()),
+            timeline_mode: from_proposed
+                .map(|p| p.timeline_mode.clone())
+                .unwrap_or_else(|| "overlay".to_string()),
+            render_mode: from_proposed
+                .map(|p| p.render_mode.clone())
+                .unwrap_or_else(|| "overlay".to_string()),
+            start_ms: review.proposed_start_ms,
+            duration_ms: review.duration_ms,
+            transcript_excerpt: from_proposed.map(|p| p.transcript_excerpt.clone()),
+            verified: true,
+            rationale: review.rationale.trim().to_string(),
+            track_index: from_proposed
+                .map(|p| {
+                    if p.timeline_mode == "insert" || p.render_mode == "insert" {
+                        2
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(1),
+            full_screen: from_proposed
+                .map(|p| p.full_screen)
+                .unwrap_or(review.full_screen),
+        });
+    }
+
+    placements.sort_by(|a, b| {
+        (
+            a.start_ms,
+            a.asset_file_name.to_lowercase(),
+            a.placement_kind.clone(),
+        )
+            .cmp(&(
+                b.start_ms,
+                b.asset_file_name.to_lowercase(),
+                b.placement_kind.clone(),
+            ))
+    });
+    placements
 }
 
 pub async fn analyze_transcript_for_overlays(
