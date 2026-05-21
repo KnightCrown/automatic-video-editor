@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { getOverlayImageDisplayUrl } from "../../services/pipelineService";
@@ -76,6 +77,11 @@ function resolveTimelineVideoSrc(rootPath: string, relativePath: string): string
   const root = rootPath.replace(/[\\/]+$/, "");
   const rel = relativePath.replace(/\//g, "\\").replace(/^[\\/]+/, "");
   return convertFileSrc(`${root}\\${rel}`);
+}
+
+function isImageTimelineClip(clip: TimelineVideoClip): boolean {
+  if (clip.assetKind === "image") return true;
+  return /\.(png|jpe?g|gif|webp)$/i.test(clip.fileName) || /\.(png|jpe?g|gif|webp)$/i.test(clip.sourceRelativePath);
 }
 
 export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
@@ -532,6 +538,27 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
               const scale = Math.max(12, Math.min(100, clip.scalePct ?? 100));
               const opacity = Math.max(0, Math.min(1, (clip.opacityPct ?? 100) / 100));
               const full = scale >= 99.5;
+              const style: CSSProperties = full
+                ? { inset: 0, width: "100%", height: "100%", objectFit: "contain", opacity }
+                : {
+                    left: "50%",
+                    top: "50%",
+                    width: `${scale}%`,
+                    transform: "translate(-50%, -50%)",
+                    opacity,
+                  };
+              if (isImageTimelineClip(clip)) {
+                return (
+                  <img
+                    key={clip.id}
+                    className="video-preview-overlay-img"
+                    src={src}
+                    alt={clip.fileName}
+                    style={style}
+                    draggable={false}
+                  />
+                );
+              }
               return (
                 <video
                   key={clip.id}
@@ -540,17 +567,7 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
                   muted
                   autoPlay
                   playsInline
-                  style={
-                    full
-                      ? { inset: 0, width: "100%", height: "100%", objectFit: "contain", opacity }
-                      : {
-                          left: "50%",
-                          top: "50%",
-                          width: `${scale}%`,
-                          transform: "translate(-50%, -50%)",
-                          opacity,
-                        }
-                  }
+                  style={style}
                   onLoadedMetadata={(e) => {
                     const media = e.currentTarget;
                     media.currentTime =

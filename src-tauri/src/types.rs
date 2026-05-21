@@ -89,17 +89,38 @@ pub struct EpisodeContentBounds {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum TimelineAssetKind {
+    Video,
+    Image,
+    Audio,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum TimelineRenderMode {
+    Overlay,
+    Insert,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetPlacement {
     pub id: String,
     pub asset_file_name: String,
+    #[serde(default = "default_asset_kind")]
+    pub asset_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_word: Option<String>,
     #[serde(default = "default_asset_placement_kind")]
     pub placement_kind: String,
     #[serde(default = "default_timeline_mode")]
     pub timeline_mode: String,
+    #[serde(default = "default_timeline_mode")]
+    pub render_mode: String,
     pub start_ms: u64,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,16 +145,24 @@ fn default_timeline_mode() -> String {
     "overlay".to_string()
 }
 
+fn default_asset_kind() -> String {
+    "video".to_string()
+}
+
 /// Pre-LLM candidate passed to the model for verification (not persisted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposedAssetTrigger {
     pub asset_file_name: String,
+    #[serde(default = "default_asset_kind")]
+    pub asset_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_word: Option<String>,
     pub placement_kind: String,
     #[serde(default = "default_timeline_mode")]
     pub timeline_mode: String,
+    #[serde(default = "default_timeline_mode")]
+    pub render_mode: String,
     pub start_ms: u64,
     pub duration_ms: u64,
     pub transcript_excerpt: String,
@@ -304,7 +333,7 @@ fn default_grok_imagine_model() -> String {
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
-            show_context: "Christian kids YouTube show. Friendly, colorful, simple overlays. No scary or violent imagery.".to_string(),
+            show_context: "Friendly, colorful, simple overlays. Avoid scary or violent imagery unless the production prompt asks otherwise.".to_string(),
             asset_folder_path: None,
             max_candidates_per_video: 10,
             openai_text_model: "gpt-4.1-mini".to_string(),
@@ -380,8 +409,12 @@ pub struct TimelineVideoClip {
     pub id: String,
     pub source_relative_path: String,
     pub file_name: String,
+    #[serde(default = "default_asset_kind")]
+    pub asset_kind: String,
     #[serde(default = "default_timeline_mode")]
     pub timeline_mode: String,
+    #[serde(default = "default_timeline_mode")]
+    pub render_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_kind: Option<String>,
     pub start_ms: u64,

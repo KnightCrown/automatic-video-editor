@@ -28,11 +28,7 @@ export type TimelineBaseSegment = {
 };
 
 export function isInsertClip(clip: TimelineVideoClip): boolean {
-  return (
-    clip.timelineMode === "insert" ||
-    clip.placementKind === "intro" ||
-    clip.placementKind === "outro"
-  );
+  return clip.renderMode === "insert" || clip.timelineMode === "insert";
 }
 
 export function effectiveClipDurationMs(clip: TimelineVideoClip): number {

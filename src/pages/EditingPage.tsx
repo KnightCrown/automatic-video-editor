@@ -1005,18 +1005,14 @@ type InsertDisplayPlan = {
 };
 
 function isInsertAsset(asset: AssetPlacement): boolean {
-  return (
-    asset.timelineMode === "insert" ||
-    asset.placementKind === "intro" ||
-    asset.placementKind === "outro"
-  );
+  return asset.renderMode === "insert" || asset.timelineMode === "insert";
 }
 
 function assetInsertAtMs(asset: AssetPlacement, analysis: TranscriptAnalysis): number {
   const contentStart = analysis.contentBounds?.contentStartMs ?? 0;
   const contentEnd = analysis.contentBounds?.contentEndMs ?? asset.startMs;
-  if (asset.placementKind === "intro" || asset.startMs <= contentStart) return contentStart;
-  if (asset.placementKind === "outro" || asset.startMs >= contentEnd) return contentEnd;
+  if (asset.startMs <= contentStart) return contentStart;
+  if (asset.startMs >= contentEnd) return contentEnd;
   return Math.max(contentStart, Math.min(contentEnd, asset.startMs));
 }
 

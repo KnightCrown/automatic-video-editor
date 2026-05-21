@@ -6,7 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::pipeline::assets::{
-    asset_placements_from_proposals, list_video_assets, propose_asset_triggers,
+    asset_placements_from_proposals, list_timeline_asset_file_names, propose_asset_triggers,
     provisional_content_end_ms,
 };
 use crate::types::{
@@ -245,12 +245,18 @@ fn merge_asset_placements(
             AssetPlacement {
                 id: Uuid::new_v4().to_string(),
                 asset_file_name: r.asset_file_name.clone(),
+                asset_kind: from_proposed
+                    .map(|p| p.asset_kind.clone())
+                    .unwrap_or_else(|| "video".to_string()),
                 trigger_word: r.trigger_word.clone(),
                 placement_kind: from_proposed
                     .map(|p| p.placement_kind.clone())
                     .unwrap_or_else(|| "trigger".to_string()),
                 timeline_mode: from_proposed
                     .map(|p| p.timeline_mode.clone())
+                    .unwrap_or_else(|| "overlay".to_string()),
+                render_mode: from_proposed
+                    .map(|p| p.render_mode.clone())
                     .unwrap_or_else(|| "overlay".to_string()),
                 start_ms: r.proposed_start_ms,
                 duration_ms: r.duration_ms,
@@ -259,10 +265,7 @@ fn merge_asset_placements(
                 rationale: r.rationale.trim().to_string(),
                 track_index: from_proposed
                     .map(|p| {
-                        if p.timeline_mode == "insert"
-                            || p.placement_kind == "intro"
-                            || p.placement_kind == "outro"
-                        {
+                        if p.timeline_mode == "insert" || p.render_mode == "insert" {
                             2
                         } else {
                             1
@@ -311,17 +314,19 @@ pub async fn analyze_transcript_for_overlays(
         provisional_end,
     );
 
-    let asset_files = asset_folder.map(list_video_assets).unwrap_or_default();
+    let asset_files = asset_folder
+        .map(list_timeline_asset_file_names)
+        .unwrap_or_default();
 
     let asset_context = asset_folder
         .map(|path| {
             let listing = if asset_files.is_empty() {
-                "(no video files found)".to_string()
+                "(no supported asset files found)".to_string()
             } else {
                 asset_files.join(", ")
             };
             format!(
-                "Configured asset folder: {path}\nAvailable video assets: {listing}\n\
+                "Configured asset folder: {path}\nAvailable timeline assets: {listing}\n\
                  ASSET RULES: When the show context names an asset file, do NOT create an AI image suggestion for that moment. \
                  Instead verify the proposed asset trigger in assetReviews. Use real asset files only — never invent filenames.",
                 path = path.display(),
@@ -335,7 +340,7 @@ pub async fn analyze_transcript_for_overlays(
     let system_prompt = format!(
         "{master}\n\n\
          ---\n\
-         SHOW-SPECIFIC CONTEXT (from the production team)\n\
+         MASTER PRODUCTION PROMPT (from the production team)\n\
          {show}\n\n\
          ---\n\
          ASSET FOLDER CONTEXT\n\
@@ -346,7 +351,7 @@ pub async fn analyze_transcript_for_overlays(
          Return ONLY valid JSON with keys:\n\
          - bibleStories: string[]\n\
          - contentBounds: {{ contentStartMs, contentEndMs, rationale }} — when the episode **actually** begins and ends for viewers \
-         (skip dead air, false starts, mic checks, and rambling before the real intro like \"hello/good morning\"; \
+         (skip dead air, false starts, mic checks, and rambling before the first real viewer-facing content; \
          trim trailing dead space and sign-offs after the episode ends). Use slice timings; video file duration is {video_duration_ms} ms.\n\
          - assetReviews: array — double-check each **Proposed asset trigger** from the user message. \
          For each: {{ assetFileName, triggerWord (optional), proposedStartMs, durationMs, verified (bool), rationale, fullScreen (bool) }}. \
@@ -358,7 +363,7 @@ pub async fn analyze_transcript_for_overlays(
          IMPORTANT: Prefer **narrow** spans: each suggestion's **(endMs - startMs)** must stay **≤ {align_ms} ms** (~{align_s} s).\n\n\
          For each AI suggestion:\n\
          - title, imagePrompt, overlayText (optional), transcriptExcerpt, startMs, endMs, idealDisplayMs (required, ≤ {max_display} ms), bibleStory (optional), rationale.\n\n\
-         Do NOT suggest AI images for asset-file moments (intro/outro/trigger clips). Those belong in assetReviews only.",
+         Do NOT suggest AI images for moments covered by real asset files. Those belong in assetReviews only.",
         master = OVERLAY_MASTER_PROMPT,
         show = settings.show_context,
         asset_context = asset_context,
@@ -515,13 +520,13 @@ pub async fn generate_overlay_image_prompt(
         "{master}\n\n\
          ---\n\
          SINGLE-MOMENT TASK\n\
-         Show context: {show}\n\n\
+         Master production prompt: {show}\n\n\
          For this ONE overlay moment, produce a refined imagePrompt and overlayText that obey the master visual style \
-         and segmentation intent (one coherent scene; educational children's Bible storybook illustration; no chibi; no photorealism).\n\n\
+         and segmentation intent (one coherent scene; clear readable composition; no photorealism unless requested).\n\n\
          Return ONLY valid JSON with keys: \
-         imagePrompt (detailed text-to-image prompt including style cues: line art, proportions, age of figures), \
-         overlayText (short on-screen text, max 8 words — punchy, child-friendly, not redundant with common titles), \
-         styleTags (array of short strings, e.g. \"educational Bible illustration\", \"storybook line art\"), \
+         imagePrompt (detailed text-to-image prompt including style cues from the production prompt), \
+         overlayText (short on-screen text, max 8 words, not redundant with common titles), \
+         styleTags (array of short strings, e.g. \"storybook line art\", \"warm editorial\"), \
          rationale (brief explanation tying the image to the excerpt).",
         master = OVERLAY_MASTER_PROMPT,
         show = settings.show_context

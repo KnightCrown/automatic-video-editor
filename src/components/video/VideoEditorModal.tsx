@@ -862,7 +862,7 @@ export function VideoEditorModal({
                 ]}
               />
               <label className="video-editor-toggle-row">
-                <span>Include intro & outro</span>
+                <span>Include scheduled assets</span>
                 <input
                   type="checkbox"
                   checked={includeIntroOutro}

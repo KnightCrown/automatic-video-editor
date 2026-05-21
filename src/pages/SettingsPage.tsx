@@ -84,7 +84,7 @@ export function SettingsPage() {
 
   const [showContext, setShowContext] = useState(
     project?.settings.showContext ??
-      "Christian kids YouTube show. Friendly, colorful, simple overlays.",
+      "Friendly, colorful, simple overlays. Avoid scary or violent imagery unless the production prompt asks otherwise.",
   );
   const [assetFolderPath, setAssetFolderPath] = useState(
     project?.settings.assetFolderPath ?? "",
@@ -379,7 +379,7 @@ export function SettingsPage() {
                 rows={5}
                 value={showContext}
                 onChange={(e) => setShowContext(e.target.value)}
-                placeholder="Describe the video style, reusable assets, intro/outro rules, and when specific assets should appear."
+                placeholder="Describe the video style, reusable assets, scheduled clips, and when specific assets should appear."
                 className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
               />
               <p className="text-xs text-textMuted mt-2">
@@ -444,8 +444,8 @@ export function SettingsPage() {
                   <h3 className="text-sm font-semibold text-white">Asset folder</h3>
                   <p className="text-xs text-textMuted mt-1">
                     Select a folder where your assets are stored. You can reference assets in this
-                    folder in your master prompt, for example: add the intro at the start of the
-                    video and play the surprise clip each time I say surprise.
+                    folder in your master prompt, for example: play opener.mp4 before the main
+                    episode and show logo.png whenever the speaker mentions the sponsor.
                   </p>
                 </div>
               </div>
@@ -530,19 +530,19 @@ function PromptHelpModal({
   const examples = [
     {
       title: "Describe the visual style",
-      text: "Make the episode feel like bright 2D storybook Bible art with clear expressions, warm lighting, and no scary imagery.",
+      text: "Make the episode feel like bright 2D storybook art with clear expressions, warm lighting, and simple readable compositions.",
     },
     {
-      title: "Add intro and outro assets",
-      text: "I have intro.mp4 and outro.mp4 in my asset folder. Start every video with intro.mp4, then play the episode, then add outro.mp4 at the end.",
+      title: "Schedule assets around the episode",
+      text: "I have opener.mp4 and closer.mp4 in my asset folder. Start every video with opener.mp4, then play the episode, then play closer.mp4 at the end.",
     },
     {
       title: "Trigger an overlay from speech",
-      text: "Each time the host says yay, play yay.mp4 as an overlay in the default overlay position for two seconds.",
+      text: "Each time the speaker says launch day, show launch-badge.png as an overlay in the default overlay position for two seconds.",
     },
     {
       title: "Use a full-screen asset",
-      text: "When the host says surprise, play surprise.mp4 as a full-screen overlay, then continue the episode.",
+      text: "When the speaker says big reveal, play reveal.mp4 full screen, then continue the episode.",
     },
     {
       title: "Give editing rules",
@@ -585,8 +585,8 @@ function PromptHelpModal({
             </div>
           ))}
           <p className="text-xs text-textMuted">
-            Asset names should match files in the selected asset folder, such as intro.mp4,
-            outro.mp4, yay.mp4, or surprise.mp4.
+            Asset names should match files in the selected asset folder, such as opener.mp4,
+            closer.mp4, reveal.mp4, or logo.png.
           </p>
         </div>
       </section>

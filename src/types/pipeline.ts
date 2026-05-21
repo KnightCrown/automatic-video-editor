@@ -42,12 +42,17 @@ export interface EpisodeContentBounds {
   rationale: string;
 }
 
+export type TimelineAssetKind = "video" | "image" | "audio" | string;
+export type TimelineRenderMode = "insert" | "overlay" | string;
+
 export interface AssetPlacement {
   id: string;
   assetFileName: string;
+  assetKind?: TimelineAssetKind;
   triggerWord?: string;
-  placementKind: "intro" | "outro" | "trigger" | string;
-  timelineMode: "insert" | "overlay" | string;
+  placementKind: "scheduled_start" | "scheduled_end" | "trigger" | string;
+  timelineMode: TimelineRenderMode;
+  renderMode?: TimelineRenderMode;
   startMs: number;
   durationMs: number;
   transcriptExcerpt?: string;
@@ -249,9 +254,11 @@ export interface TimelineVideoClip {
   /** Path relative to the project root. */
   sourceRelativePath: string;
   fileName: string;
+  assetKind?: TimelineAssetKind;
   /** insert = spliced into the base episode; overlay = composited above it. */
-  timelineMode?: "insert" | "overlay" | string;
-  placementKind?: "intro" | "outro" | "trigger" | string;
+  timelineMode?: TimelineRenderMode;
+  renderMode?: TimelineRenderMode;
+  placementKind?: "scheduled_start" | "scheduled_end" | "trigger" | string;
   startMs: number;
   durationMs: number;
   sourceDurationMs: number;

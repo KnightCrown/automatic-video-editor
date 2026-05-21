@@ -96,8 +96,7 @@ fn ms_to_sec(ms: u64) -> f64 {
 }
 
 fn is_insert_video_clip(clip: &TimelineVideoClip) -> bool {
-    clip.timeline_mode == "insert"
-        || matches!(clip.placement_kind.as_deref(), Some("intro" | "outro"))
+    clip.timeline_mode == "insert" || clip.render_mode == "insert"
 }
 
 fn shift_clips_for_content_window(
@@ -228,12 +227,57 @@ fn render_normalized_segment(
     ffmpeg: &Path,
     source: &Path,
     output: &Path,
+    asset_kind: &str,
     start_ms: u64,
     duration_ms: u64,
     video_w: u32,
     video_h: u32,
 ) -> Result<(), String> {
     let filter = normalized_segment_filter(video_w, video_h);
+    if asset_kind == "image" {
+        let dur = format!("{:.3}", ms_to_sec(duration_ms).max(0.001));
+        let args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-y".to_string(),
+            "-loop".to_string(),
+            "1".to_string(),
+            "-t".to_string(),
+            dur.clone(),
+            "-i".to_string(),
+            source.to_string_lossy().into_owned(),
+            "-f".to_string(),
+            "lavfi".to_string(),
+            "-t".to_string(),
+            dur,
+            "-i".to_string(),
+            "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
+            "-map".to_string(),
+            "0:v".to_string(),
+            "-map".to_string(),
+            "1:a".to_string(),
+            "-vf".to_string(),
+            filter,
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "veryfast".to_string(),
+            "-crf".to_string(),
+            "20".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-shortest".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            output.to_string_lossy().into_owned(),
+        ];
+        return run_ffmpeg_blocking(ffmpeg, &args, "render_insert_image_segment");
+    }
     let args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -314,7 +358,7 @@ fn render_concatenated_base_with_inserts(
             let duration = insert_at.saturating_sub(cursor);
             let segment = temp_dir.join(format!("segment-{index:03}-base.mp4"));
             render_normalized_segment(
-                ffmpeg, base_path, &segment, cursor, duration, video_w, video_h,
+                ffmpeg, base_path, &segment, "video", cursor, duration, video_w, video_h,
             )?;
             segment_paths.push(segment);
             index += 1;
@@ -327,6 +371,7 @@ fn render_concatenated_base_with_inserts(
             ffmpeg,
             &path,
             &segment,
+            &clip.asset_kind,
             clip.trim_start_ms.unwrap_or(0),
             duration,
             video_w,
@@ -344,7 +389,7 @@ fn render_concatenated_base_with_inserts(
         let duration = content_end_ms.saturating_sub(cursor);
         let segment = temp_dir.join(format!("segment-{index:03}-base.mp4"));
         render_normalized_segment(
-            ffmpeg, base_path, &segment, cursor, duration, video_w, video_h,
+            ffmpeg, base_path, &segment, "video", cursor, duration, video_w, video_h,
         )?;
         segment_paths.push(segment);
     }
@@ -742,8 +787,18 @@ fn push_overlay_inputs(args: &mut Vec<String>, image_paths: &[PathBuf]) {
     }
 }
 
-fn push_video_clip_inputs(args: &mut Vec<String>, video_paths: &[PathBuf]) {
-    for p in video_paths {
+fn push_video_clip_inputs(
+    args: &mut Vec<String>,
+    video_clips: &[TimelineVideoClip],
+    video_paths: &[PathBuf],
+) {
+    for (clip, p) in video_clips.iter().zip(video_paths.iter()) {
+        if clip.asset_kind == "image" {
+            args.push("-loop".into());
+            args.push("1".into());
+            args.push("-t".into());
+            args.push(format!("{:.3}", ms_to_sec(clip.duration_ms).max(0.001)));
+        }
         args.push("-i".into());
         args.push(p.to_string_lossy().into_owned());
     }
@@ -831,7 +886,7 @@ fn build_export_runs(
             let mut args = vec!["-y".into()];
             push_base_video_input(&mut args, video_path, content_trim);
             push_overlay_inputs(&mut args, image_paths);
-            push_video_clip_inputs(&mut args, extra_video_paths);
+            push_video_clip_inputs(&mut args, video_clips, extra_video_paths);
             if !use_filters {
                 args.push("-map".into());
                 args.push("0:v".into());
@@ -873,7 +928,7 @@ fn build_export_runs(
     let mut args = vec!["-y".into()];
     push_base_video_input(&mut args, video_path, content_trim);
     push_overlay_inputs(&mut args, image_paths);
-    push_video_clip_inputs(&mut args, extra_video_paths);
+    push_video_clip_inputs(&mut args, video_clips, extra_video_paths);
     if !use_filters {
         args.push("-map".into());
         args.push("0:v".into());

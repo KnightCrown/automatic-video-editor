@@ -7,7 +7,9 @@ export function videoClipEndMs(clip: TimelineVideoClip): number {
 export function normalizeVideoClip(clip: TimelineVideoClip): TimelineVideoClip {
   return {
     ...clip,
+    assetKind: clip.assetKind ?? "video",
     timelineMode: clip.timelineMode ?? "overlay",
+    renderMode: clip.renderMode ?? clip.timelineMode ?? "overlay",
     trimStartMs: clip.trimStartMs ?? 0,
     scalePct: clip.scalePct ?? 100,
     opacityPct: clip.opacityPct ?? 100,
