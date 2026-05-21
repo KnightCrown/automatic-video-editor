@@ -3,15 +3,18 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::pipeline::assets::{propose_asset_placements_from_settings, resolve_asset_absolute};
+use crate::pipeline::sign_off::resolve_content_end_ms;
 use crate::store::project::{
     load_final_video_timeline, load_overlay_images_manifest_for_video, load_project,
     load_transcript_analysis_for_video, load_transcript_for_video, project_paths,
     save_final_video_timeline, save_transcript_analysis,
 };
 use crate::types::{
-    AssetPlacement, FinalVideoTimeline, OverlayClipLayout, OverlayImagesManifest,
-    OverlaySuggestion, TimelineVideoClip, TranscriptAnalysis, VideoOverlayClip,
+    AssetPlacement, EpisodeContentBounds, FinalVideoTimeline, OverlayClipLayout,
+    OverlayImagesManifest, OverlaySuggestion, TimelineVideoClip, TranscriptAnalysis,
+    VideoOverlayClip,
 };
+use crate::video::encoders::probe_video_duration_sec;
 use crate::video::timeline_media::import_asset_clip;
 
 const MIN_DISPLAY_MS: u64 = 500;
@@ -141,9 +144,37 @@ pub fn refresh_asset_placements_from_current_prompt(
         return Ok(());
     };
 
+    let video_duration_ms = probe_video_duration_sec(&transcript.video_path)
+        .map(|s| (s * 1000.0).round().max(1.0) as u64)
+        .unwrap_or_else(|_| transcript.segments.last().map(|s| s.end_ms).unwrap_or(0));
+    let content_start_ms = analysis
+        .content_bounds
+        .as_ref()
+        .map(|b| b.content_start_ms)
+        .unwrap_or_else(|| transcript.segments.first().map(|s| s.start_ms).unwrap_or(0));
     let content_end_hint = analysis.content_bounds.as_ref().map(|b| b.content_end_ms);
-    analysis.asset_placements =
-        propose_asset_placements_from_settings(&transcript, &project.settings, content_end_hint);
+    let resolved_content_end = resolve_content_end_ms(
+        &transcript,
+        video_duration_ms,
+        content_end_hint,
+        content_start_ms,
+    );
+    if let Some(bounds) = analysis.content_bounds.as_mut() {
+        bounds.content_end_ms = resolved_content_end;
+        bounds.video_duration_ms = Some(video_duration_ms);
+    } else {
+        analysis.content_bounds = Some(EpisodeContentBounds {
+            content_start_ms,
+            content_end_ms: resolved_content_end,
+            video_duration_ms: Some(video_duration_ms),
+            rationale: "Content end aligned to detected host sign-off.".to_string(),
+        });
+    }
+    analysis.asset_placements = propose_asset_placements_from_settings(
+        &transcript,
+        &project.settings,
+        Some(resolved_content_end),
+    );
     save_transcript_analysis(&paths, &analysis)
 }
 
@@ -153,11 +184,20 @@ pub fn resolve_final_video_timeline(
     root_path: &str,
     video_id: &str,
 ) -> Result<FinalVideoTimeline, String> {
-    refresh_asset_placements_from_current_prompt(root_path, video_id)?;
     let paths = project_paths(root_path)?;
+
+    if let Some(saved) = load_final_video_timeline(&paths, video_id)? {
+        if !saved.clips.is_empty() || !saved.video_clips.is_empty() {
+            return Ok(saved);
+        }
+    }
+
     let built = build_default_timeline(root_path, video_id)?;
 
     let Some(saved) = load_final_video_timeline(&paths, video_id)? else {
+        if !built.clips.is_empty() || !built.video_clips.is_empty() {
+            save_final_video_timeline(&paths, &built)?;
+        }
         return Ok(built);
     };
 

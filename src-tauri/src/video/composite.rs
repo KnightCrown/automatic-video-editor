@@ -575,12 +575,14 @@ fn build_extra_video_video_chain(
         let scale_pct = extra_video_scale_pct(clip);
         let opacity = extra_video_opacity(clip);
         let prep = format!("vclip{i}");
+        let center_x = clip.center_x_pct.unwrap_or(50.0).clamp(0.0, 100.0);
+        let center_y = clip.center_y_pct.unwrap_or(50.0).clamp(0.0, 100.0);
         let (overlay_x, overlay_y) = if scale_pct >= 99.5 {
             ("0".to_string(), "0".to_string())
         } else {
             (
-                "(main_w-overlay_w)/2".to_string(),
-                "(main_h-overlay_h)/2".to_string(),
+                format!("(main_w*{center_x}/100-overlay_w/2)"),
+                format!("(main_h*{center_y}/100-overlay_h/2)"),
             )
         };
 

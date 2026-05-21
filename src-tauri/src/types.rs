@@ -425,6 +425,10 @@ pub struct TimelineVideoClip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_x_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_y_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_pct: Option<f64>,

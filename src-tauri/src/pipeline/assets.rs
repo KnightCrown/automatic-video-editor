@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::pipeline::sign_off::{detect_episode_sign_off, resolve_content_end_ms};
 use crate::pipeline::word_timing::{
     find_fuzzy_phrase_occurrences, find_phrase_occurrences, find_word_occurrences, normalize_token,
     words_for_matching, WordOccurrence,
@@ -169,30 +170,8 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
             infer_schedule_anchor(&asset_window)
         }
     });
-    let overlay_requested = contains_any(
-        &asset_clause,
-        &[
-            " as an overlay",
-            " overlay",
-            "overlay position",
-            " on screen",
-            " keep it visible",
-            " keep on screen",
-            " show ",
-            " display ",
-        ],
-    );
-    let full_screen = contains_any(
-        &asset_clause,
-        &[
-            "full-screen",
-            "full screen",
-            "fullscreen",
-            "full-frame",
-            "full frame",
-            "not as an overlay",
-        ],
-    );
+    let overlay_requested = overlay_mode_requested(&asset_clause);
+    let full_screen = full_screen_requested(&asset_clause, &asset_window);
     let insert_requested = full_screen
         || schedule_anchor != ScheduleAnchor::None
         || contains_any(
@@ -204,14 +183,31 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
                 "resume after",
                 "then continue",
                 "then resumes",
+                "then resume",
+                "immediately play",
+                "resume the episode",
+                "resume episode",
                 "play before",
                 "play after",
                 "insert ",
                 "cut away",
             ],
+        )
+        || contains_any(
+            &asset_window,
+            &[
+                "then resume",
+                "immediately play",
+                "resume the episode",
+                "resume episode",
+                "continue after",
+                "continues after",
+            ],
         );
 
     let timeline_mode = if schedule_anchor != ScheduleAnchor::None {
+        "insert".to_string()
+    } else if full_screen {
         "insert".to_string()
     } else if insert_requested && !overlay_requested {
         "insert".to_string()
@@ -250,6 +246,7 @@ fn infer_rules_for_asset(asset: &TimelineAssetFile, show_context: &str) -> Asset
             "immediately after",
             "right after",
             "after the phrase",
+            "after the phrase completes",
             "after it says",
             "after they say",
             "after the user says",
@@ -322,6 +319,42 @@ fn infer_schedule_anchor(window: &str) -> ScheduleAnchor {
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
+}
+
+const FULL_SCREEN_MARKERS: &[&str] = &[
+    "full-screen",
+    "full screen",
+    "fullscreen",
+    "full-frame",
+    "full frame",
+    "not as an overlay",
+];
+
+fn full_screen_requested(clause: &str, window: &str) -> bool {
+    contains_any(clause, FULL_SCREEN_MARKERS) || contains_any(window, FULL_SCREEN_MARKERS)
+}
+
+fn overlay_mode_requested(clause: &str) -> bool {
+    if contains_any(
+        clause,
+        &[
+            " as an overlay",
+            " as overlay",
+            "overlay position",
+            " on screen",
+            " keep it visible",
+            " keep on screen",
+        ],
+    ) {
+        return true;
+    }
+    if contains_word_phrase(clause, "overlay") {
+        return contains_any(clause, &[" as an overlay", " as overlay", "play ", "show ", "display ", "keep "]);
+    }
+    if contains_any(clause, &[" show ", " display "]) {
+        return !full_screen_requested(clause, "");
+    }
+    false
 }
 
 fn contains_word_phrase(text: &str, phrase: &str) -> bool {
@@ -770,17 +803,33 @@ pub fn propose_asset_triggers(
             }
             ScheduleAnchor::End => {
                 let duration = rule.duration_ms.unwrap_or(asset_duration_ms);
-                let start = provisional_content_end_ms.min(video_duration_ms);
+                let sign_off = detect_episode_sign_off(transcript, video_duration_ms);
+                let start = sign_off
+                    .as_ref()
+                    .map(|m| m.end_ms)
+                    .unwrap_or(provisional_content_end_ms)
+                    .min(video_duration_ms);
+                let excerpt = sign_off
+                    .as_ref()
+                    .map(|m| {
+                        format!(
+                            "Sign-off detected ({}) — outro plays immediately after: {}",
+                            m.matched_text, m.excerpt
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "Scheduled asset near the end of the timeline.".to_string()
+                    });
                 proposed.push(ProposedAssetTrigger {
                     asset_file_name: rule.file_name.clone(),
                     asset_kind: rule.asset_kind.clone(),
-                    trigger_word: None,
+                    trigger_word: sign_off.map(|m| m.matched_text),
                     placement_kind: rule.placement_kind.clone(),
                     timeline_mode: rule.timeline_mode.clone(),
                     render_mode: rule.render_mode.clone(),
                     start_ms: start,
                     duration_ms: duration,
-                    transcript_excerpt: "Scheduled asset near the end of the timeline.".to_string(),
+                    transcript_excerpt: excerpt,
                     full_screen: rule.full_screen || rule.render_mode == "insert",
                 });
             }
@@ -878,9 +927,8 @@ pub fn propose_asset_placements_from_settings(
     let video_duration_ms = probe_video_duration_sec(&transcript.video_path)
         .map(|s| (s * 1000.0).round().max(1.0) as u64)
         .unwrap_or_else(|_| transcript.segments.last().map(|s| s.end_ms).unwrap_or(0));
-    let provisional_end = content_end_hint_ms
-        .unwrap_or_else(|| provisional_content_end_ms(transcript, video_duration_ms))
-        .min(video_duration_ms);
+    let provisional_end =
+        resolve_content_end_ms(transcript, video_duration_ms, content_end_hint_ms, 0);
     let asset_folder = settings
         .asset_folder_path
         .as_deref()
@@ -897,12 +945,7 @@ pub fn propose_asset_placements_from_settings(
 }
 
 pub fn provisional_content_end_ms(transcript: &Transcript, video_duration_ms: u64) -> u64 {
-    transcript
-        .segments
-        .last()
-        .map(|s| s.end_ms)
-        .unwrap_or(video_duration_ms)
-        .min(video_duration_ms)
+    resolve_content_end_ms(transcript, video_duration_ms, None, 0)
 }
 
 pub fn resolve_asset_absolute(asset_folder: &Path, file_name: &str) -> Result<PathBuf, String> {
@@ -1024,5 +1067,97 @@ mod tests {
             .expect("outro placement");
         assert_eq!(outro.placement_kind, "scheduled_end");
         assert_eq!(outro.render_mode, "insert");
+    }
+
+    #[test]
+    fn outro_places_immediately_after_final_sign_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "devotiontime-outro-signoff-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Outro.mp4"), b"not a real video").unwrap();
+
+        let transcript = Transcript {
+            video_id: "v1".to_string(),
+            video_path: "episode.mp4".to_string(),
+            full_text: String::new(),
+            segments: vec![TranscriptSegment {
+                start_ms: 57_000,
+                end_ms: 59_500,
+                text: "Thanks everyone, bye!".to_string(),
+            }],
+            words: Some(vec![
+                word(57_000, "Thanks"),
+                word(57_500, "everyone"),
+                word(58_000, "bye"),
+            ]),
+            probed_video_stream_start_sec: None,
+            probed_audio_stream_start_sec: None,
+            applied_transcript_timing_offset_ms: None,
+        };
+
+        let proposed = propose_asset_triggers(&transcript, "End with outro.mp4", Some(&dir), 60_000, 60_000);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let outro = proposed
+            .iter()
+            .find(|p| p.asset_file_name.eq_ignore_ascii_case("Outro.mp4"))
+            .expect("outro placement");
+        assert_eq!(outro.start_ms, 58_400);
+        assert!(outro.transcript_excerpt.contains("Sign-off detected"));
+    }
+
+    #[test]
+    fn cheer_full_screen_insert_despite_later_overlay_section() {
+        let dir = std::env::temp_dir().join(format!(
+            "devotiontime-cheer-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cheer.mp4"), b"not a real video").unwrap();
+
+        let transcript = Transcript {
+            video_id: "v1".to_string(),
+            video_path: "episode.mp4".to_string(),
+            full_text: "Hello everybody it's devotion time with Miss T".to_string(),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms: 4_000,
+                text: "Hello everybody it's devotion time with Miss T".to_string(),
+            }],
+            words: Some(vec![
+                word(0, "Hello"),
+                word(500, "everybody"),
+                word(1_500, "it's"),
+                word(2_000, "devotion"),
+                word(2_500, "time"),
+                word(3_000, "with"),
+                word(3_500, "Miss"),
+                word(4_000, "T"),
+            ]),
+            probed_video_stream_start_sec: None,
+            probed_audio_stream_start_sec: None,
+            applied_transcript_timing_offset_ms: None,
+        };
+        let prompt = "After the phrase completes:\n\
+            \"Hello everybody... it's devotion time with Miss T!\"\n\
+            immediately play Cheer.mp4\n\
+            full screen\n\
+            then resume the episode\n\
+            Prayer Overlay Logic\n\
+            when they say amen show cross.png as an overlay";
+
+        let proposed = propose_asset_triggers(&transcript, prompt, Some(&dir), 120_000, 115_000);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let cheer = proposed
+            .iter()
+            .find(|p| p.asset_file_name.eq_ignore_ascii_case("Cheer.mp4"))
+            .expect("cheer placement");
+        assert_eq!(cheer.render_mode, "insert");
+        assert_eq!(cheer.timeline_mode, "insert");
+        assert!(cheer.full_screen);
+        assert_eq!(cheer.start_ms, 4_400);
     }
 }

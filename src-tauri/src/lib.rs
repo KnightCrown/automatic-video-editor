@@ -374,7 +374,6 @@ fn get_transcript_analysis(
     root_path: String,
     video_id: String,
 ) -> Result<Option<TranscriptAnalysis>, String> {
-    refresh_asset_placements_from_current_prompt(&root_path, &video_id)?;
     let paths = project_paths(&root_path)?;
     let video_path = load_project(&root_path)?
         .videos

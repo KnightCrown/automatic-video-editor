@@ -61,18 +61,14 @@ export function GalleryPage() {
     }
     setLoading(true);
     try {
+      const rows = await Promise.all(
+        projectVideos.map(async (video) => {
+          const manifest = await getOverlayImagesManifest(project.rootPath, video.id);
+          return { video, manifest };
+        }),
+      );
       const all: GalleryItem[] = [];
-      const suggestionMap: Record<string, Record<string, OverlaySuggestion>> = {};
-      for (const video of projectVideos) {
-        const [manifest, analysis] = await Promise.all([
-          getOverlayImagesManifest(project.rootPath, video.id),
-          getTranscriptAnalysis(project.rootPath, video.id).catch(() => null),
-        ]);
-        if (analysis?.suggestions.length) {
-          suggestionMap[video.id] = Object.fromEntries(
-            analysis.suggestions.map((s) => [s.id, s]),
-          );
-        }
+      for (const { video, manifest } of rows) {
         if (!manifest?.images.length) continue;
         for (const img of manifest.images) {
           all.push({
@@ -88,7 +84,7 @@ export function GalleryPage() {
           new Date(b.img.generatedAt).getTime() - new Date(a.img.generatedAt).getTime(),
       );
       setItems(all);
-      setSuggestionsByVideo(suggestionMap);
+      setSuggestionsByVideo({});
     } finally {
       setLoading(false);
     }
@@ -148,15 +144,32 @@ export function GalleryPage() {
   }, [filtered, selectedKey]);
 
   function openItemLightbox(item: GalleryItem, imageUrl?: string) {
-    if (!imageUrl) return;
-    const suggestion = suggestionsByVideo[item.videoId]?.[item.img.suggestionId];
-    setLightbox({
-      imageUrl,
-      title: item.img.title,
-      excerpt: item.img.transcriptExcerpt,
-      timeLabel: suggestion ? overlaySuggestionTimeLabel(suggestion) : undefined,
-      downloadFilename: galleryDownloadFilename(item),
-    });
+    if (!imageUrl || !project) return;
+    void (async () => {
+      let suggestion: OverlaySuggestion | undefined =
+        suggestionsByVideo[item.videoId]?.[item.img.suggestionId];
+      if (!suggestion) {
+        const analysis = await getTranscriptAnalysis(project.rootPath, item.videoId).catch(
+          () => null,
+        );
+        suggestion = analysis?.suggestions.find((s) => s.id === item.img.suggestionId);
+        if (analysis?.suggestions.length) {
+          setSuggestionsByVideo((prev) => ({
+            ...prev,
+            [item.videoId]: Object.fromEntries(
+              analysis.suggestions.map((s) => [s.id, s]),
+            ),
+          }));
+        }
+      }
+      setLightbox({
+        imageUrl,
+        title: item.img.title,
+        excerpt: item.img.transcriptExcerpt,
+        timeLabel: suggestion ? overlaySuggestionTimeLabel(suggestion) : undefined,
+        downloadFilename: galleryDownloadFilename(item),
+      });
+    })();
   }
 
   function toggleChecked(key: string) {

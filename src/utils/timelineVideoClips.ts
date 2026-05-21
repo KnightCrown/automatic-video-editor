@@ -12,6 +12,8 @@ export function normalizeVideoClip(clip: TimelineVideoClip): TimelineVideoClip {
     renderMode: clip.renderMode ?? clip.timelineMode ?? "overlay",
     trimStartMs: clip.trimStartMs ?? 0,
     scalePct: clip.scalePct ?? 100,
+    centerXPct: clip.centerXPct ?? 50,
+    centerYPct: clip.centerYPct ?? 50,
     opacityPct: clip.opacityPct ?? 100,
     volumePct: clip.volumePct ?? 100,
   };

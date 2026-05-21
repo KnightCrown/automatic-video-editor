@@ -54,11 +54,23 @@ type Props = {
   enableKeyboardShortcuts?: boolean;
   interactiveOverlays?: boolean;
   selectedClipId?: string | null;
+  selectedVideoClipId?: string | null;
   onSelectClip?: (clipId: string) => void;
+  onSelectVideoClip?: (clipId: string) => void;
   onClipLayoutChange?: (clipId: string, layout: VideoOverlayClip["layout"]) => void;
+  onVideoClipChange?: (clipId: string, patch: Partial<TimelineVideoClip>) => void;
 };
 
 type OverlayDragMode = "move" | "resize";
+
+type OverlayDragState = {
+  kind: "image" | "video";
+  clipId: string;
+  mode: OverlayDragMode;
+  startX: number;
+  startY: number;
+  startRect: OverlayEditorRect;
+};
 
 type PreviewSegment = {
   key: string;
@@ -84,6 +96,28 @@ function isImageTimelineClip(clip: TimelineVideoClip): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(clip.fileName) || /\.(png|jpe?g|gif|webp)$/i.test(clip.sourceRelativePath);
 }
 
+function videoClipToEditorRect(clip: TimelineVideoClip): OverlayEditorRect {
+  const widthPct = Math.max(12, Math.min(100, clip.scalePct ?? 100));
+  const centerX = clip.centerXPct ?? 50;
+  const centerY = clip.centerYPct ?? 50;
+  return clampOverlayEditorRect({
+    xPct: centerX - widthPct / 2,
+    yPct: centerY - widthPct / 2,
+    widthPct,
+  });
+}
+
+function editorRectToVideoClipPatch(
+  rect: OverlayEditorRect,
+): Pick<TimelineVideoClip, "scalePct" | "centerXPct" | "centerYPct"> {
+  const widthPct = Math.max(12, Math.min(100, rect.widthPct));
+  return {
+    scalePct: widthPct,
+    centerXPct: rect.xPct + widthPct / 2,
+    centerYPct: rect.yPct + widthPct / 2,
+  };
+}
+
 export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
   function VideoPreviewWithOverlays(
     {
@@ -102,8 +136,11 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
       enableKeyboardShortcuts = true,
       interactiveOverlays = false,
       selectedClipId = null,
+      selectedVideoClipId = null,
       onSelectClip,
+      onSelectVideoClip,
       onClipLayoutChange,
+      onVideoClipChange,
     },
     ref,
   ) {
@@ -129,13 +166,7 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
     const rafRef = useRef<number | null>(null);
     const activeSegmentRef = useRef<PreviewSegment | null>(null);
     const pendingSeekRef = useRef<{ ms: number; play: boolean } | null>(null);
-    const overlayDragRef = useRef<{
-      clipId: string;
-      mode: OverlayDragMode;
-      startX: number;
-      startY: number;
-      startRect: OverlayEditorRect;
-    } | null>(null);
+    const overlayDragRef = useRef<OverlayDragState | null>(null);
 
     useEffect(() => {
       setMediaSrc(baseSrc);
@@ -353,30 +384,30 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
         if (drag.mode === "move") {
           const dx = pt.xPct - drag.startX;
           const dy = pt.yPct - drag.startY;
-          onClipLayoutChange?.(
-            drag.clipId,
-            editorRectToLayout(
-              clampOverlayEditorRect({
-                xPct: drag.startRect.xPct + dx,
-                yPct: drag.startRect.yPct + dy,
-                widthPct: drag.startRect.widthPct,
-              }),
-            ),
-          );
+          const nextRect = clampOverlayEditorRect({
+            xPct: drag.startRect.xPct + dx,
+            yPct: drag.startRect.yPct + dy,
+            widthPct: drag.startRect.widthPct,
+          });
+          if (drag.kind === "video") {
+            onVideoClipChange?.(drag.clipId, editorRectToVideoClipPatch(nextRect));
+          } else {
+            onClipLayoutChange?.(drag.clipId, editorRectToLayout(nextRect));
+          }
           return;
         }
 
         const widthPct = pt.xPct - drag.startRect.xPct;
-        onClipLayoutChange?.(
-          drag.clipId,
-          editorRectToLayout(
-            clampOverlayEditorRect({
-              xPct: drag.startRect.xPct,
-              yPct: drag.startRect.yPct,
-              widthPct,
-            }),
-          ),
-        );
+        const nextRect = clampOverlayEditorRect({
+          xPct: drag.startRect.xPct,
+          yPct: drag.startRect.yPct,
+          widthPct,
+        });
+        if (drag.kind === "video") {
+          onVideoClipChange?.(drag.clipId, editorRectToVideoClipPatch(nextRect));
+        } else {
+          onClipLayoutChange?.(drag.clipId, editorRectToLayout(nextRect));
+        }
       };
 
       const onPointerUp = () => {
@@ -391,7 +422,7 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
         window.removeEventListener("pointerup", onPointerUp);
         window.removeEventListener("pointercancel", onPointerUp);
       };
-    }, [interactiveOverlays, onClipLayoutChange, pointerPercent]);
+    }, [interactiveOverlays, onClipLayoutChange, onVideoClipChange, pointerPercent]);
 
     const tick = useCallback(() => {
       const v = videoRef.current;
@@ -467,6 +498,7 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
         onSelectClip?.(clip.suggestionId);
         (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
         overlayDragRef.current = {
+          kind: "image",
           clipId: clip.suggestionId,
           mode,
           startX: pt.xPct,
@@ -475,6 +507,27 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
         };
       },
       [interactiveOverlays, onClipLayoutChange, onSelectClip, pointerPercent],
+    );
+
+    const startVideoClipDrag = useCallback(
+      (clip: TimelineVideoClip, mode: OverlayDragMode, e: ReactPointerEvent) => {
+        if (!interactiveOverlays || !onVideoClipChange) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const pt = pointerPercent(e.clientX, e.clientY);
+        if (!pt) return;
+        onSelectVideoClip?.(clip.id);
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+        overlayDragRef.current = {
+          kind: "video",
+          clipId: clip.id,
+          mode,
+          startX: pt.xPct,
+          startY: pt.yPct,
+          startRect: videoClipToEditorRect(clip),
+        };
+      },
+      [interactiveOverlays, onSelectVideoClip, onVideoClipChange, pointerPercent],
     );
 
     return (
@@ -535,14 +588,71 @@ export const VideoPreviewWithOverlays = forwardRef<VideoPreviewHandle, Props>(
             {activeOverlayVideoClips.map(({ clip, finalStartMs }) => {
               const src = videoClipUrls[clip.id];
               if (!src) return null;
-              const scale = Math.max(12, Math.min(100, clip.scalePct ?? 100));
               const opacity = Math.max(0, Math.min(1, (clip.opacityPct ?? 100) / 100));
+              const scale = Math.max(12, Math.min(100, clip.scalePct ?? 100));
               const full = scale >= 99.5;
+              const selected = clip.id === selectedVideoClipId;
+
+              if (interactiveOverlays && onVideoClipChange && !full) {
+                const rect = videoClipToEditorRect(clip);
+                return (
+                  <div
+                    key={clip.id}
+                    className={`video-preview-overlay-editor-item ${selected ? "selected" : ""}`}
+                    style={{
+                      left: `${rect.xPct}%`,
+                      top: `${rect.yPct}%`,
+                      width: `${rect.widthPct}%`,
+                      opacity,
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Move video overlay: ${clip.fileName}`}
+                    onPointerDown={(e) => startVideoClipDrag(clip, "move", e)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectVideoClip?.(clip.id);
+                    }}
+                  >
+                    {isImageTimelineClip(clip) ? (
+                      <img
+                        src={src}
+                        alt={clip.fileName}
+                        className="video-preview-overlay-img"
+                        draggable={false}
+                      />
+                    ) : (
+                      <video
+                        className="video-preview-overlay-img"
+                        src={src}
+                        muted
+                        autoPlay
+                        playsInline
+                        onLoadedMetadata={(e) => {
+                          const media = e.currentTarget;
+                          media.currentTime =
+                            ((clip.trimStartMs ?? 0) + (currentMs - finalStartMs)) / 1000;
+                          void media.play();
+                        }}
+                      />
+                    )}
+                    {selected ? (
+                      <button
+                        type="button"
+                        className="video-preview-overlay-resize"
+                        aria-label={`Resize video overlay: ${clip.fileName}`}
+                        onPointerDown={(e) => startVideoClipDrag(clip, "resize", e)}
+                      />
+                    ) : null}
+                  </div>
+                );
+              }
+
               const style: CSSProperties = full
                 ? { inset: 0, width: "100%", height: "100%", objectFit: "contain", opacity }
                 : {
-                    left: "50%",
-                    top: "50%",
+                    left: `${clip.centerXPct ?? 50}%`,
+                    top: `${clip.centerYPct ?? 50}%`,
                     width: `${scale}%`,
                     transform: "translate(-50%, -50%)",
                     opacity,

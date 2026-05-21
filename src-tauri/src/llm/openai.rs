@@ -9,6 +9,7 @@ use crate::pipeline::assets::{
     asset_placements_from_proposals, is_scheduled_placement_kind, list_timeline_asset_file_names,
     propose_asset_triggers, provisional_content_end_ms,
 };
+use crate::pipeline::sign_off::resolve_content_end_ms;
 use crate::types::{
     AssetPlacement, EpisodeContentBounds, OverlayCandidate, OverlayPromptResult, OverlaySuggestion,
     ProjectSettings, ProposedAssetTrigger, Transcript, TranscriptAnalysis, TranscriptSegment,
@@ -396,8 +397,10 @@ pub async fn analyze_transcript_for_overlays(
          Return ONLY valid JSON with keys:\n\
          - bibleStories: string[]\n\
          - contentBounds: {{ contentStartMs, contentEndMs, rationale }} — when the episode **actually** begins and ends for viewers \
-         (skip dead air, false starts, mic checks, and rambling before the first real viewer-facing content; \
-         trim trailing dead space and sign-offs after the episode ends). Use slice timings; video file duration is {video_duration_ms} ms.\n\
+         (skip dead air, false starts, mic checks, and rambling before the first real viewer-facing content). \
+         **contentEndMs must land immediately after the host's final sign-off** (goodbye/bye/thanks for watching/etc.), \
+         **before** any closing walk-away camera, B-roll, or silent tail. The outro insert plays right after this sign-off. \
+         Use slice timings; video file duration is {video_duration_ms} ms.\n\
          - assetReviews: array — double-check each **Proposed asset trigger** from the user message. \
          For each: {{ assetFileName, triggerWord (optional), proposedStartMs, durationMs, verified (bool), rationale, fullScreen (bool) }}. \
          Set verified=false if the timestamp does not match the show context, wrong word, rehearsal/false take, or dead air.\n\
@@ -534,9 +537,12 @@ pub async fn analyze_transcript_for_overlays(
 
     let content_bounds = payload.content_bounds.map(|b| {
         let start = b.content_start_ms.min(video_duration_ms);
-        let end = b
-            .content_end_ms
-            .clamp(start.saturating_add(500), video_duration_ms);
+        let end = resolve_content_end_ms(
+            transcript,
+            video_duration_ms,
+            Some(b.content_end_ms),
+            start,
+        );
         EpisodeContentBounds {
             content_start_ms: start,
             content_end_ms: end,

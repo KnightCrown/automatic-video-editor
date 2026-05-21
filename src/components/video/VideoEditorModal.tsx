@@ -221,8 +221,6 @@ export function VideoEditorModal({
     [selected, videoClips],
   );
 
-  const selectedOverlayId = selected?.kind === "overlay" ? selected.id : null;
-
   const handleSeek = useCallback(
     (ms: number) => {
       const nextMs = clamp(ms, 0, safeDurationMs);
@@ -594,9 +592,12 @@ export function VideoEditorModal({
               onDurationChange={setDurationMs}
               showSeekMarkers
               interactiveOverlays
-              selectedClipId={selectedOverlayId}
+              selectedClipId={selected?.kind === "overlay" ? selected.id : null}
+              selectedVideoClipId={selected?.kind === "video" ? selected.id : null}
               onSelectClip={(id) => setSelected(id ? { kind: "overlay", id } : null)}
+              onSelectVideoClip={(id) => setSelected({ kind: "video", id })}
               onClipLayoutChange={updateClipLayout}
+              onVideoClipChange={(id, patch) => updateVideoClip(id, patch)}
             />
 
             <VideoTimelineEditor

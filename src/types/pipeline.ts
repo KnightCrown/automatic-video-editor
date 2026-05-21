@@ -264,6 +264,8 @@ export interface TimelineVideoClip {
   sourceDurationMs: number;
   trimStartMs?: number;
   scalePct?: number;
+  centerXPct?: number;
+  centerYPct?: number;
   opacityPct?: number;
   volumePct?: number;
   /** 1 = first track above base video; higher = further up the stack. */

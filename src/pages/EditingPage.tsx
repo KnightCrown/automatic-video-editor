@@ -19,10 +19,10 @@ import {
   getTranscript,
   getTranscriptAnalysis,
   ensureAudioWaveform,
-  getFinalVideoTimeline,
   isApiKeySet,
   isXaiApiKeySet,
   openProject,
+  prepareFinalVideoTimeline,
   prepareFinalVideoTimelineWithSelection,
   regenerateOverlayImage,
 } from "../services/pipelineService";
@@ -163,11 +163,13 @@ export function EditingPage() {
   const reloadEpisodeData = useCallback(async () => {
     if (!project || !activeVideo) return;
     const video = activeVideo;
-    const [a, m, t, timeline] = await Promise.all([
+    const timeline = await prepareFinalVideoTimeline(project.rootPath, video.id).catch(
+      () => null,
+    );
+    const [a, m, t] = await Promise.all([
       getTranscriptAnalysis(project.rootPath, video.id).catch(() => null),
       getOverlayImagesManifest(project.rootPath, video.id).catch(() => null),
       getTranscript(project.rootPath, video.id).catch(() => null),
-      getFinalVideoTimeline(project.rootPath, video.id).catch(() => null),
     ]);
     setAnalysis(a);
     setManifest(m);

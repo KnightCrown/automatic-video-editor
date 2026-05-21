@@ -86,6 +86,7 @@ export function VideosPage() {
 
   const loadEpisodeSummaries = useCallback(async () => {
     if (!project) return;
+    const activeId = activeVideo?.id;
     const counts: Record<string, number> = {};
     const flags: Record<string, boolean> = {};
     await Promise.all(
@@ -96,6 +97,7 @@ export function VideosPage() {
         } catch {
           counts[video.id] = 0;
         }
+        if (video.id === activeId) return;
         try {
           const t = await getFinalVideoTimeline(project.rootPath, video.id);
           flags[video.id] = t.clips.length > 0;
@@ -105,8 +107,8 @@ export function VideosPage() {
       }),
     );
     setExportCounts(counts);
-    setTimelineFlags(flags);
-  }, [project]);
+    setTimelineFlags((prev) => ({ ...prev, ...flags }));
+  }, [project, activeVideo?.id]);
 
   const loadActiveEpisode = useCallback(async () => {
     if (!project || !activeVideo) {
